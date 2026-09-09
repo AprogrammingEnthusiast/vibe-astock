@@ -38,6 +38,7 @@ def invoke_json_schema(
     agent_name: str,
     skeleton: str,
     retries: int = 2,
+    strict: bool = False,
 ) -> tuple[str, Optional[Any]]:
     """JSON 模式结构化输出：prompt 给英文键骨架 → 抠 JSON → pydantic 校验 → 失败重试 → 退回自由文本。
 
@@ -64,6 +65,9 @@ def invoke_json_schema(
             raise_if_config_error(exc, agent_name)
             last_err = exc
             prompt = base_prompt + instr + f"\n\n（上次输出无法解析/不合规：{exc}；请重新只输出合法 JSON。）"
+    if strict:
+        from .llm_errors import LlmConfigError
+        raise LlmConfigError("复盘结论格式未通过检查；原报告已保留，请重试") from None
     logger.warning("%s: JSON 结构化输出连续失败(%s)，退回自由文本", agent_name, last_err)
     try:
         return llm.invoke(base_prompt).content, None

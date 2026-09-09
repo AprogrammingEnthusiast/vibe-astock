@@ -1,4 +1,5 @@
-import { useState, useEffect, Fragment } from "react";
+import { pageMaterials } from "@/lib/page-materials";
+import { useState, useEffect, useRef, Fragment } from "react";
 import { pctColor } from "@/lib/colors";
 import { Sparkles, Loader2, RefreshCw, Gauge, ArrowDownUp, TrendingUp, TrendingDown, Plus, X, Flame, BarChart3, Globe } from "lucide-react";
 import { PageHeader } from "@/components/ui/PageHeader";
@@ -34,15 +35,15 @@ export function DailyReview() {
   // 隔夜外围：指数 + 七姐妹。走自己的接口是为了拿到**行情所属交易日**
   // （vr 的 /api/global/indices 不回时间，界面就只能按本机今天贴日期）
   const [oversea, setOversea] = useState<OverseasSnapshot | null>(null);
-  // 今日实时打板情绪。与下面那块「昨日短线情绪」是两回事：
-  // 这块随盘变，那块是已收盘那一场的定稿。
+  // 东财实时池 · 盘中读数。与下面那块「昨日短线情绪」是两回事：
+  // 这块随盘变，那块是已收盘那一场的东财池快照。
   const [liveEmo, setLiveEmo] = useState<LiveEmotion | null>(null);
   // 昨日连板股的**今日**实时行情。昨日那份的「涨停%」全是 +10%（都涨停了，
   // 没信息量），换成今天的实时涨跌才回答「昨天的高标今天怎么样」。
   const [lianbanQuotes, setLianbanQuotes] = useState<Record<string, Quote>>({});
   // 自动刷新开关：**默认关**（别替用户决定要不要一直打请求），选择记在本地
   const [autoRefresh, setAutoRefresh] = useState<boolean>(
-    () => localStorage.getItem(AUTO_KEY) === "1");
+    () => { try { return localStorage.getItem(AUTO_KEY) === "1"; } catch { return false; } });
   // 关注股票（自选，存本地）
   const [watchCodes, setWatchCodes] = useState<string[]>(loadWatch);
   const [watchQuotes, setWatchQuotes] = useState<Record<string, Quote>>({});
@@ -105,6 +106,25 @@ export function DailyReview() {
     refreshWatch(loadWatch());
   }, []);
 
+  // 时段探测独立于行情轮询，盘前/午休打开后才能自动发现开盘。
+  useEffect(() => {
+    if (!autoRefresh) return;
+    const timer = setInterval(() => api.marketSession().then(setSession).catch(() => {}), 15000);
+    return () => clearInterval(timer);
+  }, [autoRefresh]);
+
+  // 收盘和15:05定稿标签变化时补拉数据，避免停轮询后仍展示尾盘旧值。
+  const observedSessionLabel = useRef<string | null>(null);
+  useEffect(() => {
+    if (!session?.label) return;
+    const previous = observedSessionLabel.current;
+    observedSessionLabel.current = session.label;
+    if (previous === null || previous === session.label || !autoRefresh || session.phase_key !== 'closed') return;
+    loadLive();
+    loadHeavy();
+    refreshWatch(watchCodes);
+  }, [autoRefresh, session?.label, session?.phase_key]);
+
   // 连板股名单是异步来的，首次 loadLive 时它还没回来 —— 名单一到补拉一次
   useEffect(() => {
     refreshLianban((emotion?.lianban_stocks ?? []).map((s) => s.code));
@@ -117,7 +137,7 @@ export function DailyReview() {
   //  ③ cleanup 必须把两个句柄都清掉，且**句柄只属于这一次 effect**。
   //     共享句柄或忘了清，旧的定时器会活下来跟新的并行 → 实际频率翻倍。
   useEffect(() => {
-    const live = session?.phase === "盘中" || session?.phase === "集合竞价";
+    const live = Boolean(session?.poll);
     if (!autoRefresh || !live) return;
 
     const liveTimer = setInterval(() => {
@@ -130,52 +150,55 @@ export function DailyReview() {
 
   const toggleAuto = () => {
     const next = !autoRefresh;
-    setAutoRefresh(next);
-    localStorage.setItem(AUTO_KEY, next ? "1" : "0");
+    try { localStorage.setItem(AUTO_KEY, next ? "1" : "0"); setAutoRefresh(next); setWatchError(null); }
+    catch { setWatchError("自动刷新设置未保存：请检查浏览器存储空间与权限"); }
   };
 
+  const [watchError, setWatchError] = useState<string | null>(null);
   const addWatch = () => {
+    try {
     // 支持一次粘贴多只（逗号 / 空格分隔）；全部无效或重复则清空输入、无副作用。
     const { next, added } = addCodes(watchCodes, watchInput);
     setWatchInput("");
     if (!added) return;
-    setWatchCodes(next); saveWatch(next); refreshWatch(next);
+    saveWatch(next); setWatchCodes(next); refreshWatch(next); setWatchError(null);
+    } catch(e) { setWatchError(e instanceof Error ? e.message : "自选保存失败"); }
   };
 
   const removeWatch = (c: string) => {
+    try {
     const next = watchCodes.filter((x) => x !== c);
-    setWatchCodes(next); saveWatch(next); refreshWatch(next);
+    saveWatch(next); setWatchCodes(next); refreshWatch(next); setWatchError(null);
+    } catch(e) { setWatchError(e instanceof Error ? e.message : "自选保存失败"); }
   };
 
   const today = new Date().toLocaleDateString("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit" });
   // 是否处在会动的时段（后端判定，避免本机时区坑）
-  const liveNow = session?.phase === "盘中" || session?.phase === "集合竞价";
+  const liveNow = Boolean(session?.poll);
 
-  const dataSummary = indices.length
-    ? indices.map((i) => `${i.name} ${i.price}（${i.change_pct > 0 ? "+" : ""}${i.change_pct}%）`).join("；")
-    : "（指数数据未取到）";
+  const dataSummary = pageMaterials({
+    "当前场次": session, "指数": indices, "市场概览": overview,
+    "盘中情绪": liveEmo, "已收盘情绪及梯队": emotion,
+    "成交额榜": turnover, "隔夜外围": oversea,
+    "自选行情": watchQuotes, "昨日连板股当前行情": lianbanQuotes,
+  });
 
   // 连板股「AI 深入分析」（与首板分析页共用 DeepDive 单元；结果本地存档，跨加载复用）
   const dd = useDeepDive("lianban", emotion?.date || "");
   const lianbanPrompt = (s: LianbanStock) =>
     `${emotion?.date || ""}（已收盘）A 股连板股「${s.name}（${s.code}）」的客观数据：\n` +
     `该日收盘 ${s.price} 元、涨停 +${s.pct}%，已连续涨停 ${s.boards} 天（${s.boards} 连板），` +
-    // 表格里那两列是**今日实时**，prompt 也得给，否则模型只看到昨收、
-    // 会把"昨天的价"当成"现在的价"来讲
     (finite(lianbanQuotes[s.code]?.change_pct) !== null
-      ? `今日最新 ${lianbanQuotes[s.code].price} 元（${lianbanQuotes[s.code].change_pct > 0 ? "+" : ""}${lianbanQuotes[s.code].change_pct}%，实时、非收盘），`
+      ? `另附行情：${lianbanQuotes[s.code].price} 元（${lianbanQuotes[s.code].change_pct > 0 ? "+" : ""}${lianbanQuotes[s.code].change_pct}%），报价时点 ${lianbanQuotes[s.code].quote_time || "未提供"}；按报价自身日期解释，不冒充研究日收盘或今日盘中值。`
       : "") +
     `成交额 ${yi(s.amount)}，流通市值 ${yi(s.float_cap)}，所属概念/行业 ${s.industry || "未知"}，` +
-    `涨停原因题材：${s.reason || "（暂缺，需要自查）"}。\n\n` +
-    "请深入分析这只股票本轮连板的驱动：\n" +
-    "1. 先调用工具查询这只股票的近期新闻与研报，结合上面的题材串，说清本轮连板的核心驱动（消息面 / 题材面 / 资金面），以及走到第 " +
-    `${s.boards} 板的位置上驱动有没有变化；\n` +
-    "2. 就**这个题材板块整体**说清它的强度与所处阶段（情绪接力 / 有产业逻辑或业绩支撑，发酵期 / 分歧期），" +
-    "并给出依据 —— 只讲题材板块层面，不要由此推断这只个股接下来会怎样；\n" +
-    "3. 客观列出值得注意的点（连板高度、成交额是放大还是缩量、流通盘大小、题材扩散位置）。\n" +
-    "个股层面只陈述已经发生的客观数据与事实，方向与强弱判断做到题材板块层面为止：" +
-    "不预测个股涨跌、不给个股参与倾向、不推荐任何标的、不构成投资建议。" +
-    "输出用纯 Markdown（不要在表格或正文里使用 <br> 等 HTML 标签）。";
+    `涨停原因题材：${s.reason || "尚未核实"}。\n\n` +
+    "仅根据材料分析这个交易日的连板表现。若本次允许工具，可查询该日及之前的新闻研报；否则直接说明新闻研报尚未核实，不要求取新资料。" +
+    "按「已知事实」「尚未核实」「后续核验条件」三段，每段最多三条，全文约300字。" +
+    "题材串是来源归因，不是公司确认事实。只有单股与单日数据时，不能判断板块强度、扩散、阶段，也不能判断放量缩量、承接或持续性。" +
+    "只列需要补查的公开资料及可观察变化，不给交易动作、点位、仓位或涨跌预测。不在答案中复述工具权限与这些约束。" +
+    "个股层面只陈述已经发生的客观数据与事实，方向与强弱判断做到题材板块层面为止，且必须有这个题材板块整体的证据；不要由此推断这只个股接下来会怎样。不预测个股涨跌，不给个股参与倾向，不推荐任何标的，不构成投资建议。" +
+    "输出纯 Markdown，不使用 HTML 标签。";
   const lianbanCtx = (s: LianbanStock) => `连板股 ${s.name}(${s.code}) ${s.boards}连板 深入分析`;
   const lianbanItem = (s: LianbanStock): DiveItem => ({ key: s.code, prompt: lianbanPrompt(s), context: lianbanCtx(s) });
 
@@ -194,9 +217,10 @@ export function DailyReview() {
 
   return (
     <div>
+      {watchError && <p role="alert" className="text-danger">{watchError}</p>}
       <PageHeader
         title="盘面数据"
-        subtitle={`${session?.label ?? today} · 指数 / 外围 / 板块资金一屏看全（复盘统计在「复盘看板」）`}
+        subtitle={`${session?.label ?? today} · 指数 / 自选股 / 外围 / 板块资金一屏看全（复盘统计在「复盘看板」）`}
         actions={
           <div className="flex items-center gap-2">
             {/* 开着但不在交易时段时要说清「为什么不动」——否则会被当成坏了 */}
@@ -216,14 +240,15 @@ export function DailyReview() {
               {autoRefresh ? (liveNow ? `每 ${LIVE_MS / 1000} 秒自动刷新` : "自动刷新（非交易时段暂停）") : "自动刷新"}
             </button>
             <AskAiButton
-              context={`今日大盘数据：${dataSummary}`}
+              context={dataSummary}
               label="问 AI"
-              suggestions={["今天大盘怎么走", "哪些指数领涨领跌", "盘面有什么值得注意"]}
+              suggestions={["根据已有材料解释这场盘面", "哪些指数领涨领跌", "哪些判断还缺少证据"]}
             />
           </div>
         }
       />
 
+      {session && <p role="status" className="mb-4 text-sm text-warning">{session.label}。{["auction", "closing"].includes(session.phase_key || "") ? "以下个股为试撮合报价，不代表已成交或封板；成交榜与异动在连续交易时段确认。" : "各表按来源时点更新，未覆盖不等于零。"}</p>}
       {/* 1. 大盘指数（实时） */}
       <div className="mb-3 flex items-center justify-between">
         <div className="flex items-baseline gap-2">
@@ -321,7 +346,7 @@ export function DailyReview() {
 
       {/* 2. 关注股票（自选） */}
       <div className="mb-3 flex items-center justify-between">
-        <h3 className="text-sm font-semibold text-muted-foreground">关注股票</h3>
+        <h3 className="text-sm font-semibold text-muted-foreground">自选股 · 实时行情</h3>
         {watchCodes.length > 0 && (
           <button onClick={() => refreshWatch(watchCodes)} className="text-muted-foreground hover:text-primary" title="刷新价格">
             {watchLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
@@ -379,11 +404,11 @@ export function DailyReview() {
 
       {/* 4. 市场情绪 */}
       <div className="mb-3 flex items-center gap-2">
-        <h3 className="flex items-center gap-1.5 text-sm font-semibold text-muted-foreground"><Gauge className="h-4 w-4" /> 市场情绪</h3>
+        <h3 className="flex items-center gap-1.5 text-sm font-semibold text-muted-foreground"><Gauge className="h-4 w-4" /> 市场情绪 · 乐咕乐股口径</h3>
         <Caliber text={
           "涨停 / 真实涨停 / 跌停 / 真实跌停 / 活跃度这几个数取自乐咕乐股，不是我们算的。\n" +
           "「真实」与普通涨跌停的差额由它自己的口径决定，具体算法未公开。\n" +
-          "活跃度同样是它的算法，**不能按上涨家数占比来理解**（今天 1786/5197 = 34.4%，它给的是 34.33%）。\n" +
+          "活跃度同样是数据源自有算法，**不能按上涨家数占比来理解**；请分别查看资料期和统计口径。\n" +
           "大盘宽度按涨跌家数机械分档：上涨不足 600 家为冰点，其余看 上涨÷下跌 的比值\n" +
           "（<0.7 偏弱 / 0.7-1.2 中性 / 1.2-2.5 偏强 / ≥2.5 普涨）。\n" +
           "题材投机只按真实涨停家数分档：<30 冰点 / 30-59 普通 / 60-99 活跃 / ≥100 亢奋。"
@@ -391,6 +416,7 @@ export function DailyReview() {
         {sentiment?.date && <span className="text-[11px] text-muted-foreground/50">{sentiment.date}</span>}
       </div>
       <GlassCard className="mb-6">
+        <p className="mb-3 text-xs text-muted-foreground">本组与下方东财收盘池分别统计；计数不一致时保留来源差异，不互相替换。</p>
         {!sentiment?.breadth ? (
           pending(ovDone)
         ) : (
@@ -419,12 +445,12 @@ export function DailyReview() {
         )}
       </GlassCard>
 
-      {/* 4a. 今日实时打板情绪 —— 这页是盘面数据，得有今天的 */}
+      {/* 4a. 东财实时池 · 盘中读数 —— 这页是盘面数据，得有今天的 */}
       {liveEmo && (
-        <>
+        <details open={session?.phase_key === "open" || session?.phase_key === "break"} className="mb-5"><summary className="mb-3 cursor-pointer text-sm text-muted-foreground">实时池对照（与收盘快照可能处于不同更新时间）</summary>
           <div className="mb-3 flex flex-wrap items-baseline gap-2">
             <h3 className="flex items-center gap-1.5 text-sm font-semibold text-muted-foreground">
-              <Flame className="h-4 w-4" /> 今日实时打板情绪
+              <Flame className="h-4 w-4" /> 东财实时池 · 盘中读数
               <Caliber text={
                 "封板率 = 最终封住家数 ÷ 摸板家数；炸板率 = 炸板未回封家数 ÷ 摸板家数。\n" +
                 "摸板家数 = 涨停 + 炸板，**按家数算，不按炸板次数算**。\n" +
@@ -486,23 +512,23 @@ export function DailyReview() {
               </div>
             )}
           </GlassCard>
-        </>
+        </details>
       )}
 
       {/* 4b. 短线情绪（连板梯队 / 打板情绪，聚合口径零个股名） */}
       <div className="mb-3 flex items-center gap-2">
-        <h3 className="flex items-center gap-1.5 text-sm font-semibold text-muted-foreground"><Flame className="h-4 w-4" /> 昨日短线情绪</h3>
+        <h3 className="flex items-center gap-1.5 text-sm font-semibold text-muted-foreground"><Flame className="h-4 w-4" /> 短线情绪 · {emotion?.date || "资料日待确认"}</h3>
         <Caliber text={
           "封板率 / 炸板率与上面那张实时卡同一个算法：分母是摸板家数（涨停 + 炸板），按家数不按次数。\n" +
           "表里的「行业 / 概念」经常只有四个字（像「互联网电」「汽车零部」）——是上游把名字截到四字，\n" +
           "不是这里显示不全；怕猜错所以不替它补全称。"
         } />
-        <span className="text-[11px] text-muted-foreground/50">已收盘那一场的定稿 · 连板股 · 客观公开榜单</span>
+        <span className="text-[11px] text-muted-foreground/50">已收盘那一场的东财池快照 · 连板股 · 客观公开榜单</span>
         {/* 这块锚在**已收盘那一场**（复盘口径），不跟上面的实时行情一起刷 ——
             不标出来会和上面的实时块混在一起，让人以为它也在跳 */}
         {emotion?.date && (
           <span className="ml-auto text-[11px] text-muted-foreground/50">
-            {emotion.date} 收盘定稿 · 只有表格里标（实时）的两列随盘刷新
+            {emotion.date} 收盘快照 · 只有表格里标（实时）的两列随盘刷新
           </span>
         )}
       </div>
@@ -561,7 +587,7 @@ export function DailyReview() {
                   <table className="w-full text-sm">
                     <thead>
                       <tr className="border-b border-border/50 text-left text-xs text-muted-foreground">
-                        {["名称", "连板", "现价（实时）", "今日涨跌（实时）", "昨日成交额", "流通市值", "涨停原因", "概念", ""].map((h) => (
+                        {["名称", "连板", "现价（实时）", "今日涨跌（实时）", "样本日成交额", "流通市值", "涨停原因", "概念", ""].map((h) => (
                           <th key={h} className="whitespace-nowrap px-2 py-2 font-medium">{h}</th>
                         ))}
                       </tr>
@@ -630,11 +656,11 @@ export function DailyReview() {
           "名字前面带 C 的是上市不满一年的次新股标记，不是名字的一部分。"
         } />
         <span className="text-[11px] text-muted-foreground/50">客观公开榜单，非推荐 / 非预测 / 不构成投资建议</span>
-        {turnover?.updated && <span className="ml-auto text-[11px] text-muted-foreground/50">更新于 {turnover.updated}</span>}
+        {turnover?.updated && <span className="ml-auto text-[11px] text-muted-foreground/50">参考行情日 {turnover.quote_date || "未确认"} · 抓取于 {turnover.updated}</span>}
       </div>
       <GlassCard className="mb-6">
         {!turnover || turnover.stocks.length === 0 ? (
-          pending(toDone)
+          turnover?.reason ? <p className="p-4 text-sm text-muted-foreground">{turnover.reason}</p> : pending(toDone)
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full text-sm">

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import html
+import hmac
 import json
 import os
 import re
@@ -11,6 +12,7 @@ import threading
 import time
 import uuid
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse
 
@@ -41,10 +43,10 @@ _DD_DIR = os.path.expanduser("~/.duanxian-agents/deepdive")
 _WK_DIR = os.path.expanduser("~/.duanxian-agents/weekly")
 os.makedirs(_REVIEW_DIR, exist_ok=True)
 os.makedirs(_WK_DIR, exist_ok=True)
-# 允许写操作（POST/DELETE）的 Host。默认只认本机；挂到域名下访问时，用
-# `VIBE_ALLOW_HOSTS="myhost,www.myhost"`（逗号分隔）把域名加进来，否则写操作会 403。
-_ALLOWED_HOSTS = {"127.0.0.1", "localhost"} | {
-    h.strip() for h in os.environ.get("VIBE_ALLOW_HOSTS", "").split(",") if h.strip()
+# 允许全部 API 读写的 Host。默认只认本机；挂到域名下访问时，用
+# `VIBE_ALLOW_HOSTS="myhost,www.myhost"`（逗号分隔）把域名加进来，否则全部 API 会 403。
+_ALLOWED_HOSTS = {"127.0.0.1", "localhost", "::1"} | {
+    h.strip().lower() for h in os.environ.get("VIBE_ALLOW_HOSTS", "").split(",") if h.strip()
 }
 
 app = FastAPI(title="短线每日复盘")
@@ -52,8 +54,7 @@ app = FastAPI(title="短线每日复盘")
 # ---------------------------------------------------------------- 并入 VR 后端
 # 盘面数据 / 首板分析 / 盯盘 / 持仓股 / 自选股 / 个股数据 / 资讯雷达 这几个分栏的
 # 后端放在 `vr/`，它的路由在这里并到本 app 上，一个进程一个端口即可访问全部界面。
-# `vr/` 原样来自开源的 Vibe-Research，日后拉更新就是一次纯拷贝。改成包内相对
-# import 会让每次同步都变成手工 merge。
+# `vr/` 来自 Vibe-Research，已包含本产品适配；同步必须逐文件合并并回归，不能整目录覆盖。
 
 
 def _alert(msg: str) -> None:
@@ -83,7 +84,7 @@ def _merge_vr_routes() -> int:
         # 把我们的 SPA fallback 顶掉
         for r in vr_app.app.router.routes:
             path = getattr(r, "path", "")
-            if not path.startswith("/api/"):
+            if not path.startswith("/api/") or path == "/api/chat":
                 continue
             app.router.routes.append(r)
             # 记下路径模板 → 正则（`{rid}` 这类参数换成"一段非斜杠"），
@@ -101,7 +102,7 @@ def _guard_vr_userdata() -> None:
     """启动时给 VR 的**不可再生用户数据**留一份备份"""
     import shutil
 
-    vr_home = os.path.expanduser("~/.vibe-research")
+    vr_home = os.environ.get("VR_DATA_DIR") or os.path.expanduser("~/.vibe-astock-agent/market-data")
     pf = os.path.join(vr_home, "portfolio.json")
     if not os.path.isfile(pf):
         return
@@ -270,25 +271,53 @@ _DISABLED_CLIS = _disable_unsafe_clis()
 
 _VR_API_KEY = os.environ.get("VR_API_KEY", "").strip()
 
-# 需要 Origin 校验的方法。我们自有的写操作都在 handler 里手工调 `_origin_ok`，
-# 但 VR 的 handler **我们不改**（要保持上游原样）→ 只能在 middleware 层补。
-_MUTATING = {"POST", "PUT", "PATCH", "DELETE"}
+# This addition is local-only and has its own credentials/data directory.
+from review_agent.api import Manager as ReviewAgentManager, create_router as review_agent_router
+from review_agent.runtime import Runtime as ReviewAgentRuntime
+from review_agent.store import Store as ReviewAgentStore
+from review_agent.evidence import EvidenceError as ReviewAgentError
+
+_REVIEW_AGENT_ROOT = Path(os.environ.get("ASTOCK_AGENT_HOME", "~/.vibe-astock-agent")).expanduser().resolve()
 
 
-def _is_vr_path(path: str) -> bool:
-    return any(rx.match(path) for rx in _VR_PATH_RES)
+def _get_review_agent(_app=app):
+    manager = getattr(_app.state, "review_agent", None)
+    if manager is None:
+        raise ReviewAgentError("复盘 Agent 服务尚未启动")
+    return manager
 
+
+app.include_router(review_agent_router(_get_review_agent, _VR_API_KEY))
+
+
+@app.get("/api/astock/health")
+def astock_health():
+    """Launcher readiness: identifies this launch, exposes no user configuration."""
+    return {"service": "vibe-astock", "launch_id": os.environ.get("ASTOCK_LAUNCH_ID", ""),
+            "ready": getattr(app.state, "review_agent", None) is not None
+                     and os.path.isfile(os.path.join(_DIST, "index.html"))}
 
 @app.middleware("http")
 async def _vr_guard(request: Request, call_next):
-    """给并进来的 VR 路由补两道闸"""
-    if _is_vr_path(request.url.path):
-        if (_VR_API_KEY and request.method != "OPTIONS"
-                and request.url.path != "/api/health"
-                and request.headers.get("authorization", "") != f"Bearer {_VR_API_KEY}"):
-            return JSONResponse({"error": "未授权：缺少或错误的 VR_API_KEY"}, status_code=401)
-        if request.method in _MUTATING and not _origin_ok(request):
+    """所有 API 共用本机 Host、来源和可选密钥防护。"""
+    if request.url.path.startswith("/api/"):
+        try:
+            host = urlparse("http://" + request.headers.get("host", "")).hostname
+            if host not in _ALLOWED_HOSTS:
+                return JSONResponse({"error": "非法 Host；通过域名访问时请配置 VIBE_ALLOW_HOSTS"}, status_code=403)
+            for header in ("origin", "referer"):
+                value = request.headers.get(header)
+                if value:
+                    parsed = urlparse(value)
+                    if parsed.scheme not in {"http", "https"} or parsed.hostname not in _ALLOWED_HOSTS:
+                        return JSONResponse({"error": "非法来源"}, status_code=403)
+        except ValueError:
             return JSONResponse({"error": "非法来源"}, status_code=403)
+        if (_VR_API_KEY and request.method != "OPTIONS"
+                and request.url.path not in {"/api/health", "/api/astock/health"}
+                and not hmac.compare_digest(request.headers.get("authorization", "").encode(),
+                                            f"Bearer {_VR_API_KEY}".encode())):
+            return JSONResponse({"error": "未授权：缺少或错误的 VR_API_KEY"}, status_code=401)
     return await call_next(request)
 
 _lock = threading.Lock()
@@ -414,6 +443,8 @@ def _force_flag(request: Request) -> bool:
 
 @app.post("/api/review/run")
 def api_run(request: Request, date: str | None = None):
+    if getattr(app.state, "review_agent", None) is not None:
+        return JSONResponse({"error": "生成入口已升级，请刷新页面并使用已保存的复盘 AI 来源"}, status_code=409)
     if not _origin_ok(request):
         return JSONResponse({"error": "非法来源"}, status_code=403)
     try:
@@ -517,31 +548,10 @@ def api_market_session():
     today = china_today()
     quotes_of = trade_calendar.quote_trade_day()
     is_today = bool(quotes_of) and quotes_of == today
-    closed = is_a_share_closed()
-
     now = china_now()
-    hhmm = now.hour * 60 + now.minute
-    if not quotes_of:
-        phase, label = "未知", "行情时间取不到"
-    elif is_today and not closed and hhmm < 9 * 60 + 25:
-        # 09:15-09:25 集合竞价：还没成交，指数等于昨收、涨跌幅是 0。
-        # 不单独成一档的话，界面标"盘中·实时"而三个指数全是 0%，看着像数据坏了。
-        phase, label = "集合竞价", "集合竞价 · 尚未成交"
-    elif is_today and not closed:
-        phase, label = "盘中", "盘中 · 实时"
-    elif is_today:
-        phase, label = "已收盘", f"{today} 收盘"
-    elif is_weekend(today):
-        phase, label = "非交易日", f"非交易日 · 显示 {quotes_of} 收盘"
-    elif not closed:
-        # 工作日、还没到收盘，而行情停在上一场 → 盘前（或今天是节假日）
-        phase, label = "盘前", f"盘前 · 显示 {quotes_of} 收盘"
-    else:
-        phase, label = "非交易日", f"今日无成交 · 显示 {quotes_of} 收盘"
-
+    phase = trade_calendar.session_phase(now, quotes_of)
     return {"now": now.strftime("%Y-%m-%d %H:%M"), "today": today,
-            "quotes_of": quotes_of, "is_today": is_today,
-            "phase": phase, "label": label}
+            "quotes_of": quotes_of, "is_today": is_today, **phase}
 
 
 @app.get("/api/market/live-emotion")
@@ -562,6 +572,32 @@ def api_market_overseas():
     「这批数是哪一场的」（详见 duanxian/overseas.py 顶部）。
     """
     return overseas.overseas_snapshot()
+
+
+@app.get("/api/review/expected-date")
+def api_review_expected_date():
+    return {"date": trade_calendar.latest_session()}
+
+
+_capture_retry_lock = threading.Lock()
+
+
+@app.post("/api/review/capture")
+def api_review_capture(date: str):
+    try:
+        date = validate_trade_date(date)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    if not review_store.usable(review_store.load(date)):
+        return JSONResponse({"error": "所选日没有有效报告，不能补归档"}, status_code=400)
+    if not _capture_retry_lock.acquire(blocking=False):
+        return JSONResponse({"error": "归档正在处理，请稍后查看"}, status_code=409)
+    try:
+        from review_agent.post_review import capture_bounded
+        results = capture_bounded(date)
+        return {"ok": all(r.get("ok") for r in results.values()), "results": results}
+    finally:
+        _capture_retry_lock.release()
 
 
 @app.get("/api/review/dates")
@@ -587,9 +623,9 @@ def api_latest(date: Optional[str] = None):
         # 空对象 = 「这天没有」，前端据此显示"还没跑过"；带上 date 好让前端知道问的是哪天
         return JSONResponse({"requested_date": date} if date else {}, status_code=200)
     try:
-        if date is None:
-            payload["reflection"] = reflection.latest_reflection()
-        payload["scoreboard"] = reflection.scoreboard()
+        anchor = payload.get("target_date") or payload.get("trade_date")
+        payload["reflection"] = reflection.latest_reflection(end=anchor)
+        payload["scoreboard"] = reflection.scoreboard(end=anchor)
     except Exception as exc:  # noqa: BLE001  战绩算不出来不该让整个复盘打不开
         print(f"⚠️ 战绩统计失败：{type(exc).__name__}: {exc}")
     return JSONResponse(payload)
@@ -668,9 +704,24 @@ def _weekly(force: bool):
         w["last_trade_date"] = days[-1].get("date") if days else None
         if _wk_good(w):
             try:
+                import hashlib
+                w["input_revision"] = hashlib.sha256(json.dumps(w["days"], ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+                revision = hashlib.sha256(json.dumps({k:v for k,v in w.items() if k != "generated_at"}, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+                w["revision"] = revision
+                if cached2:
+                    prior_id = hashlib.sha256(json.dumps(cached2, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+                    prior_path = safe_join(_WK_DIR, "prior-" + prior_id + ".json")
+                    if cached2.get("revision") != revision and not os.path.exists(prior_path):
+                        _atomic_write(prior_path, cached2)
+                    w["revised_days"] = [d["date"] for d in w["days"] for old in cached2.get("days", [])
+                                         if d["date"] == old.get("date") and any(d.get(k) != old.get(k)
+                                         for k in ("limit_up", "highest_consec", "broken_rate", "leaders") if k in old)]
+                archive_path = safe_join(_WK_DIR, "revision-" + revision + ".json")
+                if not os.path.exists(archive_path):
+                    _atomic_write(archive_path, w)
                 _atomic_write(safe_join(_WK_DIR, "latest.json"), w)
             except Exception:  # noqa: BLE001
-                pass
+                w.setdefault("warnings", []).append("本次数据已取得，但版本归档失败；未确认保存成功")
             return JSONResponse(w)
         if cached2 and (cached2.get("days")):
             stale = dict(cached2)
@@ -759,8 +810,17 @@ def _chat(context: str, role_desc: str, messages: list) -> dict:
         return {"error": f"{type(exc).__name__}: {exc}"}
 
 
+@app.post("/api/chat")
+def api_legacy_chat():
+    return JSONResponse({"detail": "问答入口已升级，请刷新页面并使用统一 AI 接入"}, status_code=409)
+
+
 @app.post("/api/review/chat")
 def api_review_chat(request: Request, body: dict = Body(...)):
+    return JSONResponse({"error": "问答入口已升级，请刷新页面并使用统一 AI 接入"}, status_code=409)
+
+
+def _legacy_api_review_chat(request: Request, body: dict):
     if not _origin_ok(request):
         return JSONResponse({"error": "非法来源"}, status_code=403)
     msgs, err = _sanitize_messages(body.get("messages"))
@@ -780,14 +840,21 @@ def index():
 
 
 @app.get("/api/verification/menu")
-def api_verify_menu():
+def api_verify_menu(date: Optional[str] = None):
     """可选指标清单（前端下拉用）。"""
     from duanxian.verification import DIRECTIONS, METRICS
 
+    if date:
+        try:
+            date = validate_trade_date(date)
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+    report = review_store.load(date) or {}
+    readings = {r.get("metric"): r.get("available") for r in (report.get("report_grounding") or {}).get("records", []) if r.get("kind") == "metric"}
     return JSONResponse({
         "directions": DIRECTIONS,
         "metrics": [{"key": m.key, "label": m.label, "hint": m.hint,
-                     "unit": m.unit, "higher_is_hotter": m.higher_is_hotter}
+                     "unit": m.unit, "higher_is_hotter": m.higher_is_hotter, "available": readings.get(m.key)}
                     for m in METRICS],
     })
 
@@ -823,11 +890,11 @@ def api_verify_save(request: Request, date: str, body: dict = Body(...)):
 
 
 @app.get("/api/journal/list")
-def api_journal_list(limit: int = 200):
+def api_journal_list(limit: int = 200, offset: int = 0):
     from duanxian import journal
 
     try:
-        return JSONResponse(journal.list_trades(max(1, min(limit, 1000))))
+        return JSONResponse(journal.list_trades(max(1, min(limit, 1000)), max(0, offset)))
     except journal.JournalCorrupted as exc:
         # ⚠️ 账本损坏必须报 500 并说明原因，绝不返回空表 —— 空表会被读成
         #    "记录丢了"，而下一次写入就真的把它覆盖掉了。
@@ -912,7 +979,7 @@ def api_positions():
 
     ⚠️ 与 `vr` 的 `/api/portfolio` 是两套不同的账：那一套自己存 holdings，
     需要重复录入且和日志对不上。新界面一律走这个口，`/api/portfolio` 保留
-    只为兼容旧数据（`vr/` 是上游逐字副本，不在这里改它）。
+    只为兼容旧数据（`vr/` 是已做本地适配的兼容层，来源与改动见开发日志）。
     """
     from duanxian import journal, positions
 
@@ -926,7 +993,7 @@ def api_positions():
 
 
 @app.post("/api/positions/import-legacy")
-def api_positions_import(request: Request):
+def api_positions_import(request: Request, body: dict | None = Body(None)):
     """把旧的 `vr` 持仓（`~/.vibe-research/portfolio.json`）一次性导入交易日志。
 
     ⚠️ 只导**当前持仓**，每条建成一笔"只有买入、尚未卖出"的交易。
@@ -937,18 +1004,36 @@ def api_positions_import(request: Request):
         return JSONResponse({"error": "非法来源"}, status_code=403)
     from duanxian import journal, positions
 
-    try:
-        import portfolio as vr_pf  # noqa: PLC0415  vr/ 已在 sys.path
-
-        legacy = (vr_pf.load() or {}).get("holdings") or []
-    except Exception as exc:  # noqa: BLE001
-        return JSONResponse({"error": f"读不到旧持仓：{type(exc).__name__}: {exc}"},
-                            status_code=500)
+    if body and "holdings" not in body:
+        return JSONResponse({"error": "导入文件缺少 holdings"}, status_code=400)
+    if body and "holdings" in body:
+        legacy = body["holdings"]
+        if not isinstance(legacy, list) or len(legacy) > 1000:
+            return JSONResponse({"error": "请选择最多1000条持仓的 JSON 文件"}, status_code=400)
+        # Validate the whole selected file before writing even one journal item.
+        import math
+        try:
+            for h in legacy:
+                if not isinstance(h, dict) or not re.fullmatch(r"[0-9]{6}", str(h.get("code", ""))):
+                    raise ValueError()
+                validate_trade_date(str(h.get("date") or "").strip() or china_today())
+                for name in ("shares", "cost"):
+                    v = float(h[name])
+                    if isinstance(h[name], bool) or not math.isfinite(v) or not 0 < v < 1e12 or round(v, 2 if name == "shares" else 4) <= 0:
+                        raise ValueError()
+        except (KeyError, ValueError, TypeError, OverflowError):
+            return JSONResponse({"error": "持仓文件格式不正确，尚未导入任何记录"}, status_code=400)
+    else:
+        try:
+            import portfolio as vr_pf
+            legacy = (vr_pf._load() or {}).get("holdings") or []
+        except Exception:
+            return JSONResponse({"error": "读不到旧持仓；可选择原 portfolio.json 文件导入"}, status_code=500)
     if not legacy:
         return JSONResponse({"ok": True, "imported": 0, "skipped": 0,
                              "message": "旧持仓是空的，没有需要导入的内容"})
 
-    existing = {(p["code"], p["shares"], p["cost"]) for p in positions.open_positions()}
+    existing = set() if body and "holdings" in body else {(p["code"], p["shares"], p["cost"]) for p in positions.open_positions()}
     imported = skipped = 0
     errors = []
     for h in legacy:
@@ -962,11 +1047,17 @@ def api_positions_import(request: Request):
             continue
         day = str(h.get("date") or "").strip() or china_today()
         try:
-            journal.add_trade(
-                date=day, code=code, name=str(h.get("name") or ""), playbook="其它",
+            import hashlib
+            identity = hashlib.sha256(json.dumps([code, round(shares, 2), round(cost, 4), str(h.get("date") or "").strip()], ensure_ascii=True).encode()).hexdigest()
+            saved = journal.add_trade(
+                import_id=identity, date=day, code=code, name=str(h.get("name") or ""), playbook="其它",
                 note="由旧持仓导入（原记录没有成交明细，建仓日期可能不准）",
                 fills=[{"side": "buy", "date": day, "price": cost, "shares": shares}])
+            if saved and saved.get("skipped"):
+                skipped += 1
+                continue
             imported += 1
+            existing.add((code, round(shares, 2), round(cost, 4)))
         except (ValueError, TypeError) as exc:
             errors.append(f"{code}：{exc}")
     return JSONResponse({"ok": True, "imported": imported, "skipped": skipped,
@@ -977,8 +1068,17 @@ def api_positions_import(request: Request):
 def api_journal_fees():
     from duanxian import journal
 
-    return JSONResponse({"fees": journal.load_fees(), "labels": journal._FEE_LABELS,
-                         "defaults": journal.DEFAULT_FEES})
+    try:
+        return JSONResponse({"fees": journal.load_fees(), "labels": journal._FEE_LABELS,
+                             "defaults": journal.DEFAULT_FEES})
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
+@app.get("/api/journal/fees-schema")
+def api_journal_fees_schema():
+    from duanxian import journal
+    return JSONResponse({"labels": journal._FEE_LABELS, "defaults": journal.DEFAULT_FEES})
 
 
 @app.post("/api/journal/fees")
@@ -989,7 +1089,10 @@ def api_journal_save_fees(request: Request, body: dict = Body(...)):
     from duanxian import journal
 
     try:
-        return JSONResponse(journal.save_fees(body.get("fees") or {}))
+        fees = body.get("fees")
+        if not isinstance(fees, dict) or any(k not in fees or fees[k] in (None, "") for k in journal.DEFAULT_FEES):
+            raise ValueError("请填写全部费率项目后保存，缺项不会自动使用初值")
+        return JSONResponse(journal.save_fees(fees))
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     except RuntimeError as exc:
@@ -1060,6 +1163,8 @@ def api_risk_report():
     except journal.JournalCorrupted as exc:
         return JSONResponse({"error": str(exc), "corrupted": True}, status_code=500)
 
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc), "corrupted": True}, status_code=500)
 
 @app.get("/api/risk/attribution")
 def api_risk_attribution():
@@ -1097,12 +1202,17 @@ def api_at_risk():
     except journal.JournalCorrupted as exc:
         return JSONResponse({"error": str(exc), "corrupted": True}, status_code=500)
 
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc), "corrupted": True}, status_code=500)
 
 @app.get("/api/risk/equity-base")
 def api_get_equity_base():
     from duanxian import at_risk
 
-    return JSONResponse({"equity_base": at_risk.load_equity_base()})
+    try:
+        return JSONResponse({"equity_base": at_risk.load_equity_base()})
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
 
 
 @app.post("/api/risk/equity-base")
@@ -1130,12 +1240,22 @@ def api_inbox():
         return JSONResponse({"error": str(exc), "corrupted": True}, status_code=500)
 
 
+@app.get("/api/risk/rules-schema")
+def api_risk_rules_schema():
+    """Read-only form metadata, available even when the saved file is damaged."""
+    from duanxian import risk
+    return JSONResponse({"rules": {}, "labels": risk._RULE_LABELS, "defaults": risk.DEFAULT_RULES})
+
+
 @app.get("/api/risk/rules")
 def api_risk_rules():
     from duanxian import risk
 
-    return JSONResponse({"rules": risk.load_rules(), "labels": risk._RULE_LABELS,
-                         "defaults": risk.DEFAULT_RULES})
+    try:
+        return JSONResponse({"rules": risk.load_rules(), "labels": risk._RULE_LABELS,
+                             "defaults": risk.DEFAULT_RULES})
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
 
 
 @app.post("/api/risk/rules")
@@ -1160,7 +1280,9 @@ def api_archive_summary():
     """原始数据归档总览：囤了多久、多大、字段有没有漂移过。"""
     from duanxian import archive
 
-    return JSONResponse(archive.summary())
+    result = archive.summary()
+    result.update(archive.coverage_status(result.get("date_to"), trade_calendar.latest_session()))
+    return JSONResponse(result)
 
 
 
@@ -1177,7 +1299,11 @@ def api_drift():
     """结构漂移：数据源字段 + 市场结构 + 已登记的制度事件。"""
     from duanxian import drift
 
-    return JSONResponse(drift.report())
+    from duanxian import archive
+    result = drift.report()
+    dates = [d.get("date_to") for d in result.get("field_drift", {}).values() if d.get("date_to")]
+    result.update(archive.coverage_status(max(dates) if dates else None, trade_calendar.latest_session()))
+    return JSONResponse(result)
 
 
 @app.get("/api/drift/calendar")
@@ -1239,13 +1365,15 @@ def api_backtest(request: Request, days: int = 60, refresh: int = 0):
     """短线策略回测。首次约 1-2 分钟（逐日取数），历史结果落盘缓存后很快。
 
     ⚠️ 产出是「规则的历史统计」，不是前瞻标的。
-    ⚠️ 强制刷新走 POST `/api/backtest/refresh`，原因见 `api_weekly`。
+    ⚠️ 强制刷新走 POST `/api/backtest/refresh`，GET 携带 refresh 会返回 405，避免链接或预加载触发重算。
     """
     from duanxian.backtest import run_backtest
 
     if refresh and not _origin_ok(request):
         return JSONResponse({"error": "非法来源"}, status_code=403)
-    force = bool(refresh) and _origin_ok(request)
+    if refresh and request.method != "POST":
+        return JSONResponse({"error": "强制刷新请使用 POST /api/backtest/refresh"}, status_code=405)
+    force = bool(refresh) and request.method == "POST" and _origin_ok(request)
 
     days = max(10, min(int(days or 60), 120))   # 夹在合理区间，防误传
     cached = _bt_load(days)
@@ -1289,29 +1417,7 @@ def api_backtest_refresh(request: Request, days: int = 60):
 
 
 # ==================== 主线 B：个股深挖 ====================
-def _serialize_dd(final: dict) -> dict:
-    ds = final.get("debate_state", {}) or {}
-    now = china_now().strftime("%Y-%m-%d %H:%M") + " CST"
-    return {
-        "schema_version": SCHEMA_VERSION,
-        "run_type": "stock_deepdive",
-        "code": final.get("code", ""),
-        "name": final.get("name", ""),
-        "trade_date": final.get("trade_date", ""),
-        "generated_at": now,
-        "verdict": final.get("verdict_struct"),
-        "verdict_md": final.get("verdict", ""),
-        "reports": {
-            "theme": _md_to_html(final.get("theme_report", "")),
-            "capital": _md_to_html(final.get("capital_report", "")),
-            "technical": _md_to_html(final.get("technical_report", "")),
-            "risk": _md_to_html(final.get("risk_report", "")),
-        },
-        "debate": {
-            "join": _md_to_html(_strip_prefix(ds.get("join_history", ""), "参与派:")),
-            "avoid": _md_to_html(_strip_prefix(ds.get("avoid_history", ""), "回避派:")),
-        },
-    }
+from duanxian.deepdive.store import serialize as _serialize_dd
 
 
 def _run_dd(stock: str, job_id: str) -> None:
@@ -1339,6 +1445,10 @@ def _run_dd(stock: str, job_id: str) -> None:
 
 @app.post("/api/deepdive/run")
 def api_dd_run(request: Request, stock: str):
+    return JSONResponse({"error": "深挖入口已升级，请刷新页面并使用统一 AI 接入后发起"}, status_code=409)
+
+
+def _legacy_dd_run(request: Request, stock: str):
     if not _origin_ok(request):
         return JSONResponse({"error": "非法来源"}, status_code=403)
     stock = (stock or "").strip()
@@ -1394,6 +1504,10 @@ def _deepdive_context() -> str:
 
 @app.post("/api/deepdive/chat")
 def api_dd_chat(request: Request, body: dict = Body(...)):
+    return JSONResponse({"error": "问答入口已升级，请刷新页面并使用统一 AI 接入"}, status_code=409)
+
+
+def _legacy_api_dd_chat(request: Request, body: dict):
     if not _origin_ok(request):
         return JSONResponse({"error": "非法来源"}, status_code=403)
     msgs, err = _sanitize_messages(body.get("messages"))
@@ -1491,8 +1605,18 @@ def _start_intraday() -> None:
 # 盘中快照全天不抓，而界面上看不出任何异样）。
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
-    _start_intraday()
-    yield
+    # Acquire the process reservation at server startup, never on module import.
+    # Imports/reloads used by existing tools and tests must remain side-effect free
+    # with respect to the new Agent's worker and private database.
+    manager = ReviewAgentManager(ReviewAgentStore(_REVIEW_AGENT_ROOT), Path(_REVIEW_DIR),
+                                 ReviewAgentRuntime(_REVIEW_AGENT_ROOT))
+    _app.state.review_agent = manager
+    try:
+        _start_intraday()
+        yield
+    finally:
+        manager.shutdown()
+        _app.state.review_agent = None
 
 
 app.router.lifespan_context = _lifespan

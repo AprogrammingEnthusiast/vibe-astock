@@ -1,4 +1,9 @@
+let monitorWarning: string | undefined;
 import { apiUrl } from "./base";
+import { randomId } from "./random-id";
+let monitorId: string | undefined;
+let registeredWatch = "";
+let registeredAt = 0;
 // 后端 API 客户端。/api → vite 代理到本仓库的 FastAPI（server.py，默认 8910）。
 // 后端未启动或数据源异常时抛 ApiError，页面据此优雅降级。
 
@@ -24,7 +29,7 @@ export function saveAccessKey(key: string) {
     if (key) localStorage.setItem(ACCESS_KEY, key);
     else localStorage.removeItem(ACCESS_KEY);
   } catch {
-    /* 隐私模式等场景 localStorage 不可用 */
+    throw new Error("未保存：浏览器禁止存储或空间不足，请检查权限后重试");
   }
 }
 
@@ -76,7 +81,7 @@ async function request<T>(path: string, method: "GET" | "POST" | "DELETE" = "GET
     if (resp.status === 401) {
       throw new ApiError("后端开启了访问鉴权（VR_API_KEY）：请在「接入 AI」页底部填写后端访问密钥", 401);
     }
-    throw new ApiError(payload?.detail || `HTTP ${resp.status}`, resp.status);
+    throw new ApiError(payload?.detail || payload?.error || `HTTP ${resp.status}`, resp.status);
   }
   return (payload?.data ?? payload) as T;
 }
@@ -84,12 +89,14 @@ async function request<T>(path: string, method: "GET" | "POST" | "DELETE" = "GET
 const get = <T>(path: string) => request<T>(path, "GET");
 
 export interface Quote {
+  quote_time?: string | null; amount_wan?: number | null;
   name: string; price: number; last_close: number; change_pct: number;
   pe_ttm: number; pb: number; mcap_yi: number; turnover_pct: number;
   limit_up: number; limit_down: number;
 }
 
 export interface Valuation {
+  quote_time?: string | null;
   name: string; code: string; price: number; mcap_yi: number;
   pe_ttm: number; pb: number;
   eps_26e: number | null; eps_27e: number | null; pe_26e: number | null;
@@ -103,10 +110,12 @@ export interface Report {
 }
 
 export interface ValMetric {
+  as_of?: string;
   current: number; percentile: number; min: number; max: number;
   p20: number; p50: number; p80: number; n: number;
 }
 export interface ValPercentile {
+  gaps?: string[];
   period: string; metrics: { pe_ttm?: ValMetric; pb?: ValMetric };
 }
 
@@ -166,13 +175,22 @@ export interface WatchRow {
   boards?: number; is_limit?: boolean;                 // 三板+行
 }
 export interface MonitorAlert {
+  change_pct?: number | null;
   ts: string; code: string; name: string; kind: string; msg: string; sources: string[];
 }
+export interface YesterdayStock extends WatchRow { sector?: string; status: string; quote_ok: boolean; quote_time?: string | null; }
+export interface YesterdayLadder {
+  available: boolean; reason?: string; warning?: string; sample_date?: string | null; quote_date?: string | null;
+  covered: number; stocks: YesterdayStock[];
+}
 export interface MonitorSnapshot {
+  watch_warning?: string;
+  warming_up?: boolean;
   ts: string; phase: "open" | "break" | "closed"; poll_seconds: number;
-  holdings: WatchRow[]; watchlist: WatchRow[];
+  holdings: WatchRow[]; holdings_error?: string; watchlist: WatchRow[];
   bigcap: { total: number; top: WatchRow[] };
   lianban3: WatchRow[];
+  yesterday_ladder?: YesterdayLadder;
   turnover: { label: string; stocks: WatchRow[] };
   alerts: MonitorAlert[];
 }
@@ -195,7 +213,7 @@ export interface TurnoverStock {
   price: number | null; pct: number | null;
   amount: number | null; mcap: number | null; float_cap: number | null; industry: string;
 }
-export interface TurnoverTop { stocks: TurnoverStock[]; updated: string }
+export interface TurnoverTop { stocks: TurnoverStock[]; updated: string; quote_date?: string; reason?: string }
 
 export interface RadarItem {
   title: string; url: string; time: string; source: string; summary?: string; zh?: string;
@@ -221,7 +239,7 @@ export interface PortfolioData {
   totals: { market_value: number; cost: number; pnl: number; pnl_pct: number };
   closed: ClosedPosition[];
   realized_pnl: number;
-  updated: string; last_refresh: string | null;
+  updated: string;
 }
 
 // 资金面 / 筹码 / 信号（v3.3 并入，均为「用户查的那只股」的公开数据）
@@ -273,6 +291,8 @@ export interface MarketSession {
   /** 实时行情代表的交易日；取不到时为 null */
   quotes_of: string | null;
   is_today: boolean;
+  poll?: boolean;
+  phase_key?: string;
   phase: string;
   /** 直接可展示的一句话，如「盘前 · 显示 2026-07-29 收盘」 */
   label: string;
@@ -331,7 +351,22 @@ export const api = {
   liveEmotion: () => get<LiveEmotion>("/market/live-emotion"),
   marketOverview: () => get<MarketOverview>("/market/overview"),
   emotion: () => get<ShortTermEmotion>("/market/emotion"),
-  monitorSnapshot: (watch: string) => get<MonitorSnapshot>(`/monitor/snapshot?watch=${encodeURIComponent(watch)}`),
+  monitorSnapshot: async (watch: string) => {
+    const codes = watch.split(',').filter(Boolean);
+    const monitored = codes.slice(0, 100).join(',');
+    if (!monitorId || monitored !== registeredWatch || Date.now() - registeredAt > 60000) {
+      monitorId ??= randomId().replace(/-/g, "");
+      registeredWatch = monitored; registeredAt = Date.now();
+      try {
+        await request('/monitor/watch', 'POST', {client_id: monitorId, codes: codes.slice(0, 100)});
+        monitorWarning = undefined;
+      } catch (e) {
+        monitorWarning = `自选监控名单未更新：${e instanceof Error ? e.message : '注册失败'}；一分钟后重试，其余行情继续展示`;
+      }
+    }
+    const snapshot = await get<MonitorSnapshot>(`/monitor/snapshot?watch=${encodeURIComponent(monitored)}`);
+    return {...snapshot, watch_warning: monitorWarning || (codes.length > 100 ? '已有自选超过100只，本页仅监控前100只；原列表保留，可在持仓自选中整理' : undefined)};
+  },
   firstBoard: () => get<FirstBoardData>("/market/first-board"),
   turnoverTop: () => get<TurnoverTop>("/market/turnover-top"),
   globalIndices: () => get<GlobalIndex[]>("/global/indices"),

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, useRef } from "react";
 import { Loader2, RefreshCw, AlertCircle, ArrowRight, Download } from "lucide-react";
 import { Link } from "react-router-dom";
 import { pctColor } from "@/lib/colors";
@@ -56,10 +56,11 @@ function Row({ h }: { h: PositionRow }) {
   );
 }
 
-export function Portfolio() {
+export function Portfolio({ embedded = false }: { embedded?: boolean }) {
   const [data, setData] = useState<PositionsReport | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const importBusy = useRef(false);
   const [msg, setMsg] = useState("");
 
   const load = useCallback(async () => {
@@ -73,18 +74,36 @@ export function Portfolio() {
 
   useEffect(() => { load(); }, [load]);
 
-  const importLegacy = async () => {
-    setBusy(true); setMsg("");
+  const saveLegacy = async (selected?: {holdings: unknown[]}) => {
+    setMsg("");
     try {
       const r = await agentPost<{ imported: number; skipped: number; errors?: string[]; message?: string }>(
-        "/api/positions/import-legacy", {});
+        "/api/positions/import-legacy", selected ?? {});
       setMsg(r.message
         ? r.message
         : `导入 ${r.imported} 条、跳过 ${r.skipped} 条${r.errors?.length ? `；${r.errors.length} 条有问题：${r.errors[0]}` : ""}`);
       await load();
     } catch (e) {
       setMsg(e instanceof Error ? `导入失败：${e.message}` : "导入失败");
-    } finally { setBusy(false); }
+    }
+  };
+
+  const importLegacy = async () => {
+    if(importBusy.current)return;
+    importBusy.current=true;setBusy(true);
+    try{await saveLegacy();}finally{importBusy.current=false;setBusy(false);}
+  };
+  const selectLegacy = async (file?: File) => {
+    if (!file || importBusy.current) return;
+    importBusy.current=true;setBusy(true);
+    try {
+      if(file.size>500000) throw new Error('文件过大，请选择持仓 JSON 文件');
+      const value:unknown=JSON.parse(await file.text());
+      if(!value || typeof value!=='object' || !('holdings' in value) || !Array.isArray(value.holdings)) throw new Error('文件须包含 holdings 持仓数组');
+      if(!window.confirm(`将所选文件中的 ${value.holdings.length} 条当前持仓导入本机交易日志？原文件保留；不会覆盖已有成交记录；没有成交日期的会明确注明。`))return;
+      await saveLegacy({holdings:value.holdings});
+    } catch(e){setMsg(e instanceof SyntaxError ? '这不是有效的 JSON 持仓文件，尚未导入任何记录；请重新选择原文件。' : e instanceof Error ? e.message : '读取文件失败');}
+    finally{importBusy.current=false;setBusy(false);}
   };
 
   const holdings = safeArray<PositionRow>(data?.holdings);
@@ -92,7 +111,7 @@ export function Portfolio() {
 
   return (
     <div className="space-y-6">
-      <PageHeader title="持仓股"
+      <PageHeader level={embedded ? 2 : 1} title="持仓股"
         subtitle="由交易日志的成交明细聚合而来 · 数据只存本机" />
 
       <div className="glass rounded-2xl p-5">
@@ -184,17 +203,20 @@ export function Portfolio() {
       <div className="glass rounded-2xl p-5">
         <h3 className="text-sm font-bold">从旧持仓导入</h3>
         <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
-          早先版本的持仓单独存在 <code>~/.vibe-research/portfolio.json</code>，和交易日志是两套账。
+          早先版本的持仓和交易日志是两套账。Mac 客户端不会自动读取其他产品目录；可选择原来的 portfolio.json 文件。
           点一下把里面的**当前持仓**导进日志，之后只维护一份。
           ⚠️ 旧记录没有成交明细，建仓日期取原记录的日期或今天，会在备注里注明；
           重复点不会重复导入。
         </p>
         <div className="mt-3 flex items-center gap-3">
-          <button onClick={importLegacy} disabled={busy}
+          <button onClick={()=>void importLegacy()} disabled={busy}
             className="flex items-center gap-1.5 rounded-lg border border-border px-3 py-1.5 text-[12px] font-semibold transition-colors hover:bg-muted/50 disabled:opacity-50">
             {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
-            导入旧持仓
+            导入本产品旧持仓
           </button>
+          <label className="rounded-lg border border-border px-3 py-1.5 text-xs">选择旧持仓文件
+            <input aria-label="选择旧持仓 JSON 文件" type="file" accept=".json,application/json" disabled={busy} className="block max-w-56 text-xs" onChange={e=>{void selectLegacy(e.target.files?.[0]);e.target.value='';}} />
+          </label>
           {msg && <span className="text-[12px] text-muted-foreground">{msg}</span>}
         </div>
       </div>

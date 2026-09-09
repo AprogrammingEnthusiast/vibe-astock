@@ -67,6 +67,8 @@ export function AgentWeekly() {
       {err && <div className="glass rounded-xl px-4 py-3 text-sm text-danger">加载失败：{err}</div>}
       {loading && !data && <div className="glass rounded-2xl py-16 text-center text-muted-foreground"><Loader2 className="mx-auto mb-2 h-5 w-5 animate-spin" />加载近5天热度…</div>}
 
+      {!!data?.revised_days?.length && <p role="status" className="text-warning">与本机上一版本不同：{data.revised_days.join("、")}；旧版本保留在本机。</p>}
+      {data?.warnings?.map((w,i) => <p key={i} role="status" className="text-warning">{w}</p>)}
       {data && !data.error && (
         <>
           {/* 5日热度 */}
@@ -78,13 +80,13 @@ export function AgentWeekly() {
               "涨停家数 = 当日最终封住涨停的家数；最高板 = 当日连板数最高那只的连板数。\n" +
               "炸板率 = 炸板家数 ÷（炸板 + 涨停），与其它几处同一个算法；\n" +
               "某天炸板池取数失败时那天留空，**不会当成 0**。\n" +
-              "当日龙头 = 当日涨停池里连板数最高的那只；并列最高时取数据源返回的第一只，\n" +
+              "当日并列最高标 = 当日涨停池里连板数最高的那只；并列最高全部列出，\n" +
               "不看成交额也不看封单 —— 所以它不等于市场公认的那只龙头。"
             } />
           </div>
             <div className="glass overflow-hidden rounded-2xl">
               <div className="grid grid-cols-[100px_1fr_64px_64px_1.2fr] items-center gap-3 bg-muted/40 px-5 py-3 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-                <span>日期</span><span>涨停家数</span><span>最高板</span><span>炸板率</span><span>当日龙头</span>
+                <span>日期</span><span>涨停家数</span><span>最高板</span><span>炸板率</span><span>当日并列最高标</span>
               </div>
               {safeArray<WeeklyData["days"][number]>(data.days).map((d) => (
                 <div key={d.date} className="grid grid-cols-[100px_1fr_64px_64px_1.2fr] items-center gap-3 border-t border-border/60 px-5 py-3 text-sm">
@@ -95,7 +97,7 @@ export function AgentWeekly() {
                   </span>
                   <span className="text-center font-extrabold text-primary">{d.highest_consec ?? "—"}板</span>
                   <span>{d.broken_rate != null ? Math.round(d.broken_rate * 100) + "%" : "—"}</span>
-                  <span className="text-[13px]">{d.leader ? `${d.leader.name} ${d.leader.boards}板 · ${d.leader.sector || ""}` : "—"}</span>
+                  <span className="text-[13px]">{d.leaders?.length ? d.leaders.map(l => `${l.name} ${l.boards}板 · ${l.sector || ""}`).join("；") : d.leader ? `${d.leader.name}（旧版仅记录一只）` : "—"}</span>
                 </div>
               ))}
             </div>
@@ -108,8 +110,8 @@ export function AgentWeekly() {
             <Caliber text={
               "这里的大号百分比**不是当日跌幅**，是「距登顶后最高点的回撤」：\n" +
               "以登顶那天的收盘价为基准算每天累计涨跌，取这段里最高的那个当高点，再看现在距它跌了多少。\n" +
-              "全部用收盘价，不看盘中最高最低；就在最高点时显示「在最高点」。\n" +
-              "「登顶」= 那天它是全市场连板数最高的那只（同上，并列时按数据源顺序取）；\n" +
+              "全部用收盘价，不看盘中最高最低；就在收盘价区间高点时显示「在收盘价区间高点」。\n" +
+              "「登顶」= 那天它是全市场连板数最高的那只（同上，并列全部纳入）；\n" +
               "一只票多次当过龙头只算**最早**那一天。「区间」= 登顶日到最近一个交易日。\n" +
               "「自登顶累计」= 登顶日收盘 → 最近交易日收盘；「最高到过」= 这段里累计涨跌的最高值。"
             } />
@@ -137,7 +139,7 @@ export function AgentWeekly() {
                       </span>
                       <span className={cn("text-xl font-extrabold",
                         dd == null ? "text-muted-foreground" : atPeak ? "text-success" : "text-danger")}>
-                        {dd == null ? "—" : atPeak ? "在最高点" : pct(dd)}
+                        {dd == null ? "—" : atPeak ? "在收盘价区间高点" : pct(dd)}
                       </span>
                     </div>
                     <div className="mt-0.5 text-xs text-muted-foreground">
@@ -148,7 +150,7 @@ export function AgentWeekly() {
                       自登顶累计 {pct(l.cum_return_since)}
                       {finite(l.peak_cum_ret) != null && ` · 最高到过 ${pct(l.peak_cum_ret)}`}
                     </div>
-                    <Sparkline leader={l} />
+                    {l.series_warning && <p className="text-xs text-warning">{l.series_warning}</p>}<Sparkline leader={l} />
                   </div>
                 );
               })}

@@ -12,7 +12,7 @@ import { cn } from "@/lib/utils";
 const color = pctColor;   // 红涨绿跌口径见 lib/colors.ts
 const pct = (v: number | undefined) => (v == null ? "—" : `${v > 0 ? "+" : ""}${v}%`);
 
-export function Watchlist() {
+export function Watchlist({ embedded = false }: { embedded?: boolean }) {
   const [codes, setCodes] = useState<string[]>(loadWatch);
   const [quotes, setQuotes] = useState<Record<string, Quote>>({});
   const [input, setInput] = useState("");
@@ -27,18 +27,22 @@ export function Watchlist() {
   useEffect(() => { refresh(loadWatch()); }, []);
 
   const add = () => {
+    try {
     const { next, added } = addCodes(codes, input);
     if (added === 0) {
       setHint(input.trim() ? "没识别到新的 6 位代码（可能已在自选里）" : null);
       setInput("");
       return;
     }
-    setCodes(next); saveWatch(next); setInput(""); setHint(`已添加 ${added} 只`);
+    saveWatch(next); setCodes(next); setInput(""); setHint(`已添加 ${added} 只`);
     refresh(next);
+    } catch(e) { setHint(e instanceof Error ? e.message : "自选保存失败"); }
   };
   const remove = (c: string) => {
+    try {
     const next = codes.filter((x) => x !== c);
-    setCodes(next); saveWatch(next); refresh(next);
+    saveWatch(next); setCodes(next); refresh(next);
+    } catch(e) { setHint(e instanceof Error ? e.message : "自选保存失败"); }
   };
 
   const aiContext = useMemo(
@@ -59,7 +63,7 @@ export function Watchlist() {
 
   return (
     <div>
-      <PageHeader
+      <PageHeader level={embedded ? 2 : 1}
         title="自选股"
         subtitle="批量添加、一屏总览你关注的标的。数据只存本地、不上传。"
         actions={
@@ -95,7 +99,7 @@ export function Watchlist() {
             <Plus className="h-4 w-4" /> 添加
           </button>
         </div>
-        {hint && <p className="mt-2 text-xs text-muted-foreground/70">{hint}</p>}
+        {hint && <p role="status" className="mt-2 text-xs text-muted-foreground/70">{hint}</p>}
       </GlassCard>
 
       <GlassCard glow>

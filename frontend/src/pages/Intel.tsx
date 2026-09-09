@@ -1,4 +1,5 @@
-import { useState, useEffect, useCallback } from "react";
+import { EventsProbability } from "@/components/workspace/EventsProbability";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { Link } from "react-router-dom";
 import { TrendingUp, FileText, Newspaper, Rss, RefreshCw, Loader2, ExternalLink, AlertCircle, Sparkles, Lightbulb, Star } from "lucide-react";
 import ReactMarkdown from "react-markdown";
@@ -15,19 +16,20 @@ import { cn } from "@/lib/utils";
 const TABS = [
   // ⚠️ planned = 还没接数据源。看起来可点、点进去却什么都没有的入口，
   //    比没有这个入口更糟 —— 所以这里禁用并明确标「规划中」，接上了再放开。
-  { key: "events", label: "事件概率", icon: TrendingUp, integrated: false, planned: true, desc: "全球宏观预期概率（公开数据、免登录只读），规划中" },
+  { key: "events", label: "事件概率", icon: TrendingUp, integrated: true, planned: false, desc: "全球宏观预期概率（公开数据、免登录只读）" },
   { key: "filings", label: "A股公告", icon: FileText, integrated: false, desc: "汇总关注列表里各个股的近期公告（东财公开披露）" },
   { key: "news", label: "公开新闻", icon: Newspaper, integrated: false, desc: "汇总关注列表里各个股的近期新闻（公开源）" },
-  { key: "investment-news", label: "Investment News", icon: Rss, integrated: true, desc: "12 赛道全球公开 RSS 资讯（集成自 investment-news 仓库）" },
+  { key: "investment-news", label: "Investment News", icon: Rss, integrated: true, desc: "12 赛道全球公开 RSS 资讯（北京时间；仅作线索，需核对与 A 股题材的关联）" },
 ];
 
-interface Digest { loading?: boolean; text?: string; err?: string; needKey?: boolean }
+interface Digest { loading?: boolean; text?: string; err?: string; needKey?: boolean; sources?: Industry['items'] }
 
 function InvestmentNewsPanel() {
   const [data, setData] = useState<RadarData | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [active, setActive] = useState("ai");
   const [refreshing, setRefreshing] = useState(false);
+  const inflight = useRef(new Set<string>());
   const [digests, setDigests] = useState<Record<string, Digest>>({});
   const [bulk, setBulk] = useState<{ running: boolean; done: number; total: number }>({ running: false, done: 0, total: 0 });
 
@@ -37,7 +39,7 @@ function InvestmentNewsPanel() {
 
   const refresh = async () => {
     setRefreshing(true); setErr(null);
-    try { setData(await api.radarRefresh()); }
+    try { setData(await api.radarRefresh()); setDigests({}); }
     catch (e) { setErr(e instanceof ApiError ? e.message : "刷新失败"); }
     finally { setRefreshing(false); }
   };
@@ -48,19 +50,23 @@ function InvestmentNewsPanel() {
 
   const genDigest = async (ind: Industry) => {
     if (!hasLlm()) { setDigests((d) => ({ ...d, [ind.key]: { needKey: true } })); return; }
-    setDigests((d) => ({ ...d, [ind.key]: { loading: true } }));
-    const ctx = ind.items.slice(0, 25).map((it) => `[${it.time}] ${it.source}｜${it.zh || it.title}`).join("\n");
+    if (inflight.current.has(ind.key)) return;
+    inflight.current.add(ind.key);
+    const sources = ind.items.slice(0, 25).map(it => ({ ...it }));
+    setDigests((d) => ({ ...d, [ind.key]: { loading: true, sources } }));
+    const ctx = sources.map((it) => `[${it.time}] ${it.source}｜${it.zh || it.title}`).join("\n");
     const prompt =
-      `以下是「${ind.name}」赛道近期资讯。请提炼「今日要点」3-5 条：每条一句话（≤40 字），` +
-      `只客观陈述重要事件 / 趋势，不推荐标的、不预测涨跌、不构成建议。直接用「- 」列点，不要多余前后缀。\n\n${ctx}`;
+      `以下是「${ind.name}」赛道近期资讯。请提炼「近7日要点」3-5 条：每条一句话（≤40 字），` +
+      `输入只有标题，未读取全文，不要把标题推断写成已核实事实。只客观陈述事件，不推荐标的、不预测涨跌、不构成建议。直接用「- 」列点，不要多余前后缀。\n\n${ctx}`;
+    let acc = "";
     try {
-      let acc = "";
       await chatStream([{ role: "user", content: prompt }], `${ind.name}赛道资讯`, {
-        onDelta: (t) => { acc += t; setDigests((d) => ({ ...d, [ind.key]: { text: acc } })); },
+        onDelta: (t) => { acc += t; setDigests((d) => ({ ...d, [ind.key]: { text: acc, loading: true, sources } })); },
       });
+      setDigests((d) => ({ ...d, [ind.key]: { text: acc, sources } }));
     } catch (e) {
-      setDigests((d) => ({ ...d, [ind.key]: { err: e instanceof ApiError ? e.message : "生成失败" } }));
-    }
+      setDigests((d) => ({ ...d, [ind.key]: { err: e instanceof ApiError ? e.message : "生成失败", text: acc, sources } }));
+    } finally { inflight.current.delete(ind.key); }
   };
 
   // 一键提炼全部赛道要点（串行，带进度；单赛道按需的按钮仍保留）
@@ -85,13 +91,13 @@ function InvestmentNewsPanel() {
         </span>
         <div className="flex items-center gap-2">
           {hasData && (
-            <button onClick={genAll} disabled={bulk.running || refreshing}
+            <button onClick={genAll} disabled={bulk.running || refreshing || Object.values(digests).some(d => d.loading)}
               className="inline-flex items-center gap-1.5 rounded-lg bg-primary/15 px-3 py-1.5 text-sm font-medium text-primary shadow-glow hover:bg-primary/25 disabled:opacity-50">
               {bulk.running ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
               {bulk.running ? `提炼中 ${bulk.done}/${bulk.total}` : "一键提炼全部要点"}
             </button>
           )}
-          <button onClick={refresh} disabled={refreshing || bulk.running}
+          <button onClick={refresh} disabled={refreshing || bulk.running || Object.values(digests).some(d => d.loading)}
             className="inline-flex items-center gap-1.5 rounded-lg border border-border px-3 py-1.5 text-sm text-muted-foreground hover:text-foreground disabled:opacity-50">
             {refreshing ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
             {refreshing ? "抓取中…" : "刷新"}
@@ -129,33 +135,36 @@ function InvestmentNewsPanel() {
 
           {cur && (
             <>
-              {/* 今日要点总结框（暖橙框） */}
+              {/* 近7日要点总结框（暖橙框） */}
               <div className="mb-4 rounded-xl border border-primary/30 bg-primary/5 p-4">
                 <div className="mb-2 flex items-center justify-between">
                   <span className="flex items-center gap-1.5 text-sm font-semibold text-primary">
-                    <Lightbulb className="h-4 w-4" /> 今日要点 · {cur.name}
+                    <Lightbulb className="h-4 w-4" /> 近7日要点 · {cur.name}
                   </span>
-                  {(dg?.text || dg?.err || dg?.needKey) && (
-                    <button onClick={() => genDigest(cur)} className="text-xs text-muted-foreground hover:text-primary">重新提炼</button>
+                  {!dg?.loading && (dg?.text || dg?.err || dg?.needKey) && (
+                    <button disabled={bulk.running || refreshing} onClick={() => genDigest(cur)} className="text-xs text-muted-foreground hover:text-primary">重新提炼</button>
                   )}
                 </div>
-                {dg?.loading ? (
+                {dg?.loading && !dg.text ? (
                   <p className="flex items-center gap-2 text-sm text-muted-foreground"><Loader2 className="h-3.5 w-3.5 animate-spin" /> AI 正在读这个赛道的资讯…</p>
                 ) : dg?.text ? (
                   <>
+                    {dg.loading && <p className="text-xs text-muted-foreground">正在生成…</p>}
+                    {dg.err && <p role="alert" className="text-sm text-destructive">生成中断：{dg.err}（下方为未完成内容）</p>}
                     <div className="prose prose-sm prose-invert max-w-none text-foreground"><ReactMarkdown remarkPlugins={[remarkGfm]}>{dg.text}</ReactMarkdown></div>
-                    <div className="mt-2"><SaveNoteButton kind="今日要点" title={`${cur.name} 今日要点`} content={dg.text} /></div>
+                    {!dg.loading && !dg.err && <div className="mt-2"><SaveNoteButton kind="近7日要点" title={`${cur.name} 近7日要点`} content={dg.text} /></div>}
                   </>
                 ) : dg?.needKey ? (
-                  <p className="text-sm text-muted-foreground">还没接入 AI。<Link to="/settings" className="text-primary">先接入你的 AI</Link>，即可一键提炼本赛道今日要点。</p>
+                  <p className="text-sm text-muted-foreground">还没接入 AI。<Link to="/settings" className="text-primary">先接入你的 AI</Link>，即可一键提炼本赛道近7日要点。</p>
                 ) : dg?.err ? (
                   <p className="text-sm text-destructive">{dg.err}</p>
                 ) : (
-                  <button onClick={() => genDigest(cur)}
+                  <button disabled={bulk.running || refreshing} onClick={() => genDigest(cur)}
                     className="inline-flex items-center gap-1.5 rounded-lg bg-primary/15 px-3 py-1.5 text-sm font-medium text-primary hover:bg-primary/25">
-                    <Sparkles className="h-4 w-4" /> 让 AI 提炼今日要点
+                    <Sparkles className="h-4 w-4" /> 让 AI 提炼近7日要点
                   </button>
                 )}
+                {dg?.sources && <details className="mt-3 text-xs text-muted-foreground"><summary>本次摘要依据：{dg.sources.length} 条标题（未读取全文）</summary><ol className="mt-2 space-y-2">{dg.sources.map((it, i) => <li key={i}>{it.time} · {it.source} · {/^https?:\/\//i.test(it.url) ? <a className="underline" href={it.url} target="_blank" rel="noopener noreferrer">{it.zh || it.title}</a> : (it.zh || it.title)}</li>)}</ol></details>}
               </div>
 
               {/* 资讯列表 */}
@@ -164,7 +173,7 @@ function InvestmentNewsPanel() {
                   <p className="py-6 text-center text-sm text-muted-foreground/60">近 {data!.recent_days} 天该赛道暂无更新</p>
                 ) : (
                   cur.items.map((it, i) => (
-                    <a key={i} href={it.url} target="_blank" rel="noreferrer"
+                    <a key={i} href={/^https?:\/\//i.test(it.url) ? it.url : undefined} target="_blank" rel="noopener noreferrer"
                       className="group flex items-baseline gap-3 border-b border-border/30 pb-2 text-sm last:border-0">
                       <span className="w-24 shrink-0 font-mono text-xs text-muted-foreground/70">{it.time}</span>
                       <span className="w-20 shrink-0 truncate text-xs text-muted-foreground">{it.source}</span>
@@ -251,7 +260,7 @@ function WatchlistFeed({ kind }: { kind: "filings" | "news" }) {
   if (!codes.length) {
     return (
       <div className="rounded-lg border border-dashed border-border/70 p-8 text-center text-sm text-muted-foreground/70">
-        还没有关注股票。到<Link to="/daily-review" className="text-primary">「每日复盘」</Link>加自选（6 位代码），这里会汇总它们的{kind === "filings" ? "公告" : "新闻"}。
+        还没有关注股票。到<Link to="/my-stocks" className="text-primary">「持仓自选」</Link>加自选（6 位代码），这里会汇总它们的{kind === "filings" ? "公告" : "新闻"}。
       </div>
     );
   }
@@ -329,10 +338,12 @@ export function Intel() {
         <div className="mb-3 flex items-center gap-2">
           <cur.icon className="h-5 w-5 text-primary" />
           <h3 className="font-semibold">{cur.label}</h3>
-          {cur.integrated && <span className="rounded-full bg-primary/15 px-2 py-0.5 text-[10px] text-primary">investment-news</span>}
+          {cur.key === "investment-news" && <span className="rounded-full bg-primary/15 px-2 py-0.5 text-[10px] text-primary">investment-news</span>}
         </div>
         {cur.key === "investment-news" ? (
           <InvestmentNewsPanel />
+        ) : cur.key === "events" ? (
+          <EventsProbability />
         ) : cur.key === "filings" ? (
           <WatchlistFeed kind="filings" />
         ) : cur.key === "news" ? (
@@ -346,7 +357,7 @@ export function Intel() {
       </GlassCard>
 
       <p className="mt-3 text-[11px] text-muted-foreground/60">
-        只做公开信息聚合、不做推荐、不预测涨跌。公告 / 新闻均来自你关注列表里个股的公开披露与公开源；赛道资讯已按合规词表过滤。今日要点由你自己配置的 AI 提炼。
+        只做公开信息聚合、不做推荐、不预测涨跌。公告 / 新闻均来自你关注列表里个股的公开披露与公开源；赛道资讯已按合规词表过滤。近7日要点由你自己配置的 AI 提炼。
       </p>
       <Disclaimer />
     </div>

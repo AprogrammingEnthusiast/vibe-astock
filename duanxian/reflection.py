@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import datetime
+import re
 import json
 import logging
 import os
@@ -367,26 +368,57 @@ def _needs_reeval(path: str) -> bool:
     return bool(r.get("provisional")) or r.get("eval_schema") != _EVAL_SCHEMA
 
 
-def auto_evaluate_prior(current_date: str) -> Optional[dict]:
-    """跑完 current_date 的复盘后，回评最近一个尚未评估的历史预测（best-effort）。"""
-    try:
-        from . import review_store  # noqa: PLC0415  避免模块级循环导入
-
-        dates = [d for d in reversed(review_store.dates()) if d < current_date]
-        for pd in dates:  # review_store.dates() 已是新→旧，过滤后仍是新→旧
+def auto_evaluate_prior(current_date: str, *, strict: bool = False) -> Optional[dict]:
+    """回评最近可评的一期；不适用的日期跳过，资料故障不阻塞更早候选。"""
+    from . import review_store
+    failures = []
+    for pd in sorted((d for d in review_store.dates() if d < current_date), reverse=True):
+        try:
             done = os.path.join(_REFLECT_DIR, f"{pd}.json")
             if os.path.exists(done) and not _needs_reeval(done):
-                continue  # 已评过且是定论
-            res = evaluate(pd)
+                continue
+            next_day = _next_trade_date(pd)
+            if (not next_day or next_day > current_date or next_day > _today()
+                    or (next_day == _today() and not _after_close())):
+                continue
+            focus = (_load_review(pd) or {}).get("focus") or {}
+            if not focus:
+                continue
+            res = evaluate(pd, eval_date=next_day)
             if res:
                 return res
-        return None
-    except Exception as exc:  # noqa: BLE001  best-effort：回评失败不该毁掉复盘本身
-        logger.warning("自动回评失败（%s）：%s: %s", current_date, type(exc).__name__, exc)
-        return None
+            # No recognized phase / resolvable leader means no evaluable target,
+            # rather than a failed market-data request.
+            recognized = focus.get("emotion_phase") in _PHASE_EXPECT
+            if not recognized:
+                names = _name_code_map()
+                recognized = any(_resolve_code(name, names)
+                    for d in focus.get("focus_directions", [])
+                    for name in d.get("leader_candidates", []))
+            if recognized:
+                failures.append(pd)
+        except Exception as exc:
+            logger.warning("自动回评失败（%s）：%s", pd, type(exc).__name__)
+            failures.append(pd)
+    if strict and failures:
+        raise RuntimeError("回评所需资料尚未完整，未完成，可重试")
+    return None
 
 
-def latest_reflection() -> Optional[dict]:
+def reflections_as_of(end: str) -> list[dict]:
+    """Only evaluations already available at the requested session may be used."""
+    validate_trade_date(end)
+    return [r for r in _all_reflections() if isinstance(r, dict)
+            and isinstance(r.get("prediction_date"), str)
+            and isinstance(r.get("eval_date"), str)
+            and r["prediction_date"] < r["eval_date"] <= end
+            and re.fullmatch(r"\d{4}-\d{2}-\d{2}", r["eval_date"])]
+
+
+def latest_reflection(end: str | None = None) -> Optional[dict]:
+    if end is not None:
+        rows = reflections_as_of(end)
+        return max(rows, key=lambda r: r["eval_date"]) if rows else None
     if not os.path.isdir(_REFLECT_DIR):
         return None
     files = sorted(f for f in os.listdir(_REFLECT_DIR) if f.endswith(".json"))
@@ -413,9 +445,9 @@ def _all_reflections() -> list[dict]:
     return out
 
 
-def scoreboard() -> dict:
+def scoreboard(end: str | None = None) -> dict:
     """AI 判断的累计战绩 —— 「回测→先验→判断→次日验证」这个环的最后一块"""
-    recs = _all_reflections()
+    recs = reflections_as_of(end) if end else _all_reflections()
     decided = [(r, (r.get("phase_eval") or {})) for r in recs]
     phase_rows = [(r, pe) for r, pe in decided if pe.get("hit") is not None]
 
@@ -473,7 +505,13 @@ def scoreboard() -> dict:
     }
 
 
-def get_past_context(limit: int = 5) -> str:
+def get_past_context(limit: int = 5, *, end: str | None = None) -> str:
+    if end is not None:
+        rows = sorted(reflections_as_of(end), key=lambda r: r["eval_date"])[-limit:]
+        # Deliberately exclude the all-time scoreboard and personal stock trades.
+        return ("历史市场观察验证（截至复盘日，非收益记录）：\n" + json.dumps([
+            {"prediction_date": r["prediction_date"], "eval_date": r["eval_date"],
+             "phase_eval": r.get("phase_eval")} for r in rows], ensure_ascii=False)) if rows else ""
     """把近 limit 次命中回看摘成一段，供裁判 prompt 参考（记吃记打）。"""
     if not os.path.isdir(_REFLECT_DIR):
         return ""

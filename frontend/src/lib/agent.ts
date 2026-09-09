@@ -1,19 +1,26 @@
+import { authHeaders } from "./api";
 import { apiUrl } from "./base";
 // 复盘 agent 的前端类型 + 助手（后端默认 8910，vite 把全部 /api 代理过去）。
 
 export async function agentFetch<T>(path: string, method: "GET" | "POST" = "GET"): Promise<T> {
-  const r = await fetch(apiUrl(path), { method });
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  const r = await fetch(apiUrl(path), { method, headers: authHeaders() });
+  if (!r.ok) {
+    const data = await r.json().catch(() => null);
+    throw new Error(typeof data?.error === "string" ? data.error : typeof data?.detail === "string" ? data.detail : `HTTP ${r.status}`);
+  }
   return (await r.json()) as T;
 }
 
 export async function agentPost<T>(path: string, body: unknown): Promise<T> {
   const r = await fetch(apiUrl(path), {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...authHeaders() },
     body: JSON.stringify(body),
   });
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  if (!r.ok) {
+    const data = await r.json().catch(() => null);
+    throw new Error(typeof data?.error === "string" ? data.error : typeof data?.detail === "string" ? data.detail : `HTTP ${r.status}`);
+  }
   return (await r.json()) as T;
 }
 
@@ -196,7 +203,7 @@ export interface EmotionMetrics {
 }
 // ---------- 客观事实表（market_facts）----------
 // 事实层回答"今天发生了什么"，指标层（EmotionMetrics）回答"什么温度"。两者互补。
-interface FactBase { available: boolean; reason?: string; prev_date?: string; }
+interface FactBase { available: boolean; reason?: string; prev_date?: string; note?: string; }
 
 export interface SealQuality extends FactBase {
   total?: number;
@@ -271,6 +278,7 @@ export interface ThemeNode {
   members: { code: string; name: string; boards: number; label?: string; zt_stat?: string | null; first_seal: string | null; broken_times: number }[];
 }
 export interface ThemeTree extends FactBase {
+  source_note?: string;
   date?: string; prev_date?: string; tag_count?: number;
   themes?: ThemeNode[]; concentration?: number | null;
   covered?: number; total_limit_up?: number; coverage_rate?: number | null;
@@ -365,6 +373,7 @@ export interface Scoreboard {
 
 export interface AnalystReport { key: string; title: string; tag: string; html: string; }
 export interface ReviewData {
+  report_grounding?: import("./report-grounding").GroundedReport;
   target_date?: string;
   trade_date?: string;
   generated_at?: string;
@@ -385,6 +394,7 @@ export interface HeatDay {
   limit_up: number | null;
   broken_rate: number | null;
   highest_consec: number | null;
+  leaders?: { code: string; name: string; boards: number; sector: string }[];
   leader: { code: string; name: string; boards: number; sector: string } | null;
   unavailable?: boolean;
 }
@@ -398,9 +408,13 @@ export interface LineageLeader {
   series: { date: string; cum_ret: number }[];
   peak_cum_ret?: number | null;        // 区间最高累计收益（收盘价口径）
   drawdown_from_peak?: number | null;  // 现价距该最高点跌了多少（≤0；不知道时 null）
+  series_warning?: string;
   is_current_top?: boolean;            // 是不是**最近一个交易日**的最高标
 }
 export interface WeeklyData {
+  revised_days?: string[];
+  warnings?: string[];
+  revision?: string;
   generated_at?: string;
   error?: string;
   stale?: boolean;
@@ -427,7 +441,7 @@ export interface Settled {
   realized_pnl?: number; realized_pct?: number;
   // 毛额与费用分开给：realized_pnl 是**净额**（已扣费用）
   gross_pnl?: number; fees?: number; fees_are_estimated?: boolean;
-  hold_days?: number; is_t0?: boolean;
+  hold_days?: number; is_t0?: boolean; settlement_warning?: string;
   buy_shares?: number; sell_shares?: number;
   open_shares?: number;      // 当前还持有多少（>0 = 持仓中）
   cycles?: number;           // >1 表示这条记录里有多轮进出
@@ -481,7 +495,7 @@ export interface ModeCard {
 export interface ModesResponse {
   cards: ModeCard[]; playbooks_hint: string[];
   performance: { available: boolean; reason?: string; cards?: ModePerf[];
-                 min_per_version?: number; note?: string };
+                 min_per_version?: number; note?: string; truncated?: boolean };
 }
 
 // ---------- 账户风险与执行偏差（risk / at_risk / excursion / attribution / inbox）----------
@@ -581,7 +595,7 @@ export interface Discipline {
   note?: string;
 }
 export interface Equity {
-  available: boolean; reason?: string;
+  available: boolean; reason?: string; date_note?: string;
   points?: EquityPoint[]; trades?: number;
   net_pnl?: number; peak?: number; peak_date?: string | null;
   current_drawdown?: number; max_drawdown?: number; max_drawdown_since?: string | null;
@@ -597,6 +611,8 @@ export interface Equity {
 export interface InboxFlag { key: string; text: string }
 export interface Violations {
   available: boolean; reason?: string;
+  rule_status?: Record<string, string>;
+  unchecked?: string[];
   rules?: Record<string, number>; is_default_rules?: boolean;
   violations?: Violation[]; violation_count?: number;
   after_loss_streak?: {
@@ -612,6 +628,7 @@ export interface ArchiveDrift {
   versions?: { since: string; fields: string[] }[];
 }
 export interface ArchiveSummary {
+  stale?: boolean; coverage_note?: string; expected_session?: string; last_archived_session?: string;
   available: boolean; days?: number;
   date_from?: string | null; date_to?: string | null; size_mb?: number;
   datasets?: Record<string, number>;
@@ -653,6 +670,7 @@ export interface DriftMetric {
   rel_change: number | null; shifted: boolean;
 }
 export interface DriftReport {
+  stale?: boolean; coverage_note?: string; expected_session?: string; last_archived_session?: string;
   available: boolean;
   field_drift?: Record<string, ArchiveDrift>; field_changed?: string[];
   structure?: {
@@ -673,6 +691,9 @@ export interface BacktestStrategy {
   final_equity: number;
 }
 export interface DeepDiveData {
+  input_sources?: { input: string; fetched_at: number; value: unknown; sha256: string }[];
+  ai_source?: {provider: string; model: string};
+  job_id?: string;
   code?: string;
   name?: string;
   trade_date?: string;
@@ -683,13 +704,13 @@ export interface DeepDiveData {
   debate?: { join: string; avoid: string };
 }
 export interface StockVerdict {
-  /** 仅部分 prompt 包会产出参与倾向（自带的 research 包只给客观画像）——渲染时必须判空 */
+  /** 历史自定义包字段，只用于识别旧记录；公开页面不展示操作倾向。 */
   stance?: string;
   one_liner: string;
   theme: string;
   capital: string;
   technical: string;
-  /** 同上，可能不存在 */
+  /** 历史自定义包字段，公开页面不展示操作点位。 */
   watch_points?: string[];
   risks: string[];
   debate_takeaway: string;

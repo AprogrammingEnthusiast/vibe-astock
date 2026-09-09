@@ -27,6 +27,7 @@ from __future__ import annotations
 import json
 import os
 import uuid
+from datetime import date as Date, timedelta
 from statistics import median
 from typing import Any, Optional
 
@@ -56,9 +57,9 @@ def _load_env() -> dict:
             env = json.load(fh)
         if env.get("schema") == _SCHEMA and isinstance(env.get("cards"), list):
             return env
-    except Exception:  # noqa: BLE001  坏了当没有，用户可以重建
-        pass
-    return {"schema": _SCHEMA, "cards": []}
+    except Exception as exc:
+        raise ValueError("模式卡存档损坏，原件保留；修复前不允许覆盖写入") from exc
+    raise ValueError("模式卡存档格式不受支持，原件保留；修复前不允许覆盖写入")
 
 
 def list_cards() -> dict:
@@ -101,6 +102,8 @@ def save_card(card: dict) -> dict:
 
     idx = next((i for i, c in enumerate(cards) if c.get("id") == cid), None)
     if idx is None:
+        if cid:
+            raise ValueError("没找到这张模式卡，可能已被删除；请刷新后重试")
         cards.append({
             "id": uuid.uuid4().hex[:12], "name": name, "playbook": pb,
             "created_at": now,
@@ -126,7 +129,7 @@ def save_card(card: dict) -> dict:
     if changed:
         # ⚠️ 规则变了开新版本，不覆盖旧版本 —— 旧版本是历史交易的归属依据。
         vers.append({"version": (last or {}).get("version", 0) + 1,
-                     "since": china_today(),
+                     "since": (Date.fromisoformat(china_today()) + timedelta(days=1)).isoformat(),
                      "changes": _clean_text(card.get("changes"), 300) or "（未填写改了什么）",
                      **body, "saved_at": now})
     else:
@@ -197,15 +200,31 @@ def performance(limit: int = 1000) -> dict:
         return {"available": False,
                 "reason": "还没有模式卡 —— 先把「我这套打法」写下来，统计才有分段依据"}
     try:
-        trades = (journal.list_trades(limit=limit) or {}).get("trades") or []
+        trade_env = journal.list_trades(limit=limit) or {}
+        trades = trade_env.get("trades") or []
+        truncated = int(trade_env.get("total", len(trades))) > len(trades)
     except Exception as exc:  # noqa: BLE001
         return {"available": False, "reason": f"读交易日志失败：{exc}"}
 
+    valid_trades = []
+    invalid_dates = 0
+    for trade in trades:
+        if trade.get("pnl_pct") is None:
+            continue  # 未形成盈亏样本的记录不参与版本业绩，也不阻断比较。
+        day = (trade.get("settled") or {}).get("first_buy") or trade.get("date") or ""
+        try:
+            parsed = Date.fromisoformat(day)
+            if parsed.isoformat() != day:
+                raise ValueError("非规范日期")
+        except (TypeError, ValueError):
+            invalid_dates += 1
+            continue
+        valid_trades.append(trade)
     out = []
     for c in cards:
         vers = c.get("versions") or []
         # ⚠️ 归属用"那天生效的那个版本的 playbook"，不是卡片当前的 playbook。
-        scored = [t for t in trades if t.get("pnl_pct") is not None]
+        scored = [t for t in valid_trades if t.get("pnl_pct") is not None]
         buckets: dict[int, list[float]] = {}
         before = []                     # 卡片诞生之前的交易，单独放，不进任何版本
         matched = 0
@@ -236,10 +255,12 @@ def performance(limit: int = 1000) -> dict:
                 **{k: v.get(k) for k in _TEXT_FIELDS},
                 **st,
                 # ⚠️ 样本不够不给倾向性比较
-                "enough": st.get("trades", 0) >= _MIN_PER_VERSION,
+                "enough": not truncated and not invalid_dates and st.get("trades", 0) >= _MIN_PER_VERSION,
             })
-        latest = by_version[-1] if by_version else None
-        prev = by_version[-2] if len(by_version) >= 2 else None
+        effective = [v for i, v in enumerate(by_version)
+                     if not any(later["since"] == v["since"] for later in by_version[i+1:])]
+        latest = effective[-1] if effective else None
+        prev = effective[-2] if len(effective) >= 2 else None
         cmp_ = None
         if latest and prev and latest["enough"] and prev["enough"] \
                 and latest.get("win_rate") is not None and prev.get("win_rate") is not None:
@@ -253,7 +274,7 @@ def performance(limit: int = 1000) -> dict:
             "version_count": len(vers),
             "by_version": by_version,
             "matched_trades": matched,
-            "before_card": _stats(before) if before else None,
+            "before_card": {**_stats(before), "enough": not truncated and not invalid_dates and len(before) >= _MIN_PER_VERSION} if before else None,
             "latest_vs_prev": cmp_,
             "compare_blocked": (bool(latest and prev) and cmp_ is None),
         })
@@ -261,7 +282,10 @@ def performance(limit: int = 1000) -> dict:
         "available": True,
         "cards": out,
         "min_per_version": _MIN_PER_VERSION,
-        "note": ("交易按 `playbook` 归到卡片，再按**发生日期落在哪个版本的生效区间**分段。"
-                 "卡片创建之前的交易单独列出，不计入任何版本 —— 否则等于用现在的规则"
+        "truncated": truncated or bool(invalid_dates),
+        "invalid_dates": invalid_dates,
+        "note": ((f"有{invalid_dates}笔交易日期异常，未纳入统计，暂停版本比较。" if invalid_dates else "") + "交易按 `playbook` 归到卡片，再按**发生日期落在哪个版本的生效区间**分段。"
+                 "按交易日归属：建卡当天纳入首版，修改从次日生效；不作日内先后归因。"
+                 "建卡日前的交易单独列出，不计入任何版本 —— 否则等于用现在的规则"
                  "评价更早的操作。"),
     }

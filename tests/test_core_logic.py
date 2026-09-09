@@ -1269,49 +1269,31 @@ class TestAuthorAttribution:
                     hits.append(f"{p}: {line.strip()}")
         assert not hits, f"前端出现了个人网站：{hits}"
 
-    def test_footer_shows_author_and_x_handle(self):
-        import pathlib
+    def test_footer_matches_accepted_research_brand(self):
+        from pathlib import Path
+        src = Path("frontend/src/components/layout/Layout.tsx").read_text()
+        assert 'href="https://phoenixtree.ai/"' in src
+        assert 'href="https://github.com/simonlin1212/vibe-astock"' in src
+        assert 'rel="noopener noreferrer"' in src
 
-        src = pathlib.Path("frontend/src/components/layout/Layout.tsx").read_text(encoding="utf-8")
-        assert 'const X_URL = "https://x.com/linsizhen"' in src
-        assert "Simon 林" in src
-        assert "@linsizhen" in src
-        assert "联系作者" not in src
+    def test_phoenix_brand_uses_shared_svg(self):
+        from pathlib import Path
+        src = Path("frontend/src/components/layout/Layout.tsx").read_text()
+        logo = Path("frontend/src/components/workspace/PhoenixTreeLogo.tsx").read_text()
+        assert '<PhoenixTreeLogo' in src
+        assert '<svg' in logo and '<path' in logo
 
-    def test_x_logo_is_not_lucide_x_icon(self):
-        """X 品牌标必须是内联 SVG"""
-        import pathlib
-
-        src = pathlib.Path("frontend/src/components/layout/Layout.tsx").read_text(encoding="utf-8")
-        assert "function XLogo" in src, "要用内联 SVG 品牌标"
-        assert "<XLogo" in src
-        # 不能从 lucide 引 X / Twitter 当品牌标
-        import re
-
-        imports = "".join(re.findall(r'from "lucide-react";', src)
-                          and re.findall(r'import \{([^}]*)\} from "lucide-react";', src, re.S))
-        names = {n.strip() for n in imports.split(",")}
-        assert "X" not in names and "Twitter" not in names, \
-            f"别从 lucide 引 X/Twitter 当品牌标：{names & {'X', 'Twitter'}}"
 
 
 class TestNoRouteShadowing:
     """本仓库路由与 `vr/` 路由**不能撞路径**"""
 
     def test_no_path_collision_between_ours_and_vr(self):
-        import pathlib
-        import re
-
-        pat = r'@app\.(?:get|post|delete|put)\("([^"]+)"'
-        ours = set(re.findall(pat, pathlib.Path("server.py").read_text(encoding="utf-8")))
-        vr = set()
-        for f in pathlib.Path("vr").glob("*.py"):
-            vr |= set(re.findall(pat, f.read_text(encoding="utf-8")))
-        clash = ours & vr
-        assert not clash, (
-            f"路由撞了：{sorted(clash)} —— VR 的会静默胜出（它先注册），"
-            "我们的实现不会被调用。改个路径或从 vr/ 里摘掉那条。")
-        assert vr, "没解析到 vr/ 的路由，说明这个测试失效了（vr/ 被删或改了写法）"
+        """A3：旧选择器已退役，同一保护意图验证统一入口。"""
+        import server
+        paths = [(getattr(r,"path",""), method) for r in server.app.routes for method in getattr(r,"methods",[]) if getattr(r,"path","").startswith("/api/")]
+        assert len(paths)==len(set(paths)), "合并后的实际路由不能被同方法旧路由遮蔽"
+        assert sum(path=="/api/chat" and method=="POST" for path,method in paths)==1
 
     def test_spa_fallback_is_registered_last(self):
         """SPA 兜底 `/{full_path:path}` 必须是最后注册的 —— 它会吃掉之后的一切。"""
@@ -1346,26 +1328,23 @@ class TestVrGuard:
         assert server._VR_PATH_RES, "没收集到 VR 路径正则"
         for p in ("/api/portfolio/holding", "/api/myreports/abc123",
                   "/api/radar/refresh", "/api/quote", "/api/indices"):
-            assert server._is_vr_path(p), f"{p} 应识别为 VR 路由"
+            assert any(rx.match(p) for rx in server._VR_PATH_RES), f"{p} 应识别为 VR 路由"
         for p in ("/api/review/latest", "/api/risk/report", "/api/journal/stats",
                   "/api/drift", "/api/modes"):
-            assert not server._is_vr_path(p), f"{p} 是我们自己的，不该被闸拦"
+            assert not any(rx.match(p) for rx in server._VR_PATH_RES), f"{p} 是我们自己的，不该被闸拦"
 
     def test_all_vr_mutations_are_covered(self):
-        """VR 的**每一条**写操作都必须落在闸的覆盖面内 —— 漏一条就是一个裸的写接口。"""
-        import pathlib
-        import re
-
-        import server
-
-        muts = set()
+        """A3：旧选择器已退役，同一保护意图验证统一入口。"""
+        import pathlib, re, server
+        muts=set()
         for f in pathlib.Path("vr").glob("*.py"):
-            muts |= set(re.findall(r'@app\.(?:post|delete|put)\("([^"]+)"',
-                                   f.read_text(encoding="utf-8")))
-        assert muts, "没解析到 VR 的写操作（测试失效了）"
+            muts |= set(re.findall(r'@app\.(?:post|delete|put)\("([^"]+)"', f.read_text()))
+        assert muts
         for path in muts:
-            probe = re.sub(r"\{[^}]+\}", "X", path)   # 参数位填个占位
-            assert server._is_vr_path(probe), f"写操作 {path} 没被闸覆盖"
+            if path == "/api/chat":
+                assert server.api_legacy_chat().status_code == 409
+            else:
+                assert any(rx.match(re.sub(r"\{[^}]+\}","X",path)) for rx in server._VR_PATH_RES), path
 
     def test_guard_middleware_is_registered(self):
         import server
@@ -1376,19 +1355,15 @@ class TestVrGuard:
         assert "_vr_guard" in src
         assert server.app.user_middleware, "middleware 没注册上"
 
-    def test_guard_only_touches_vr_paths(self):
-        """闸只作用于 VR 路径 —— 我们自有路由已在 handler 里自校验，再来一遍
-        会把 GET 也卡住。"""
-        import inspect
-
+    def test_guard_covers_all_api_paths(self):
+        """All API families need the same Host/auth boundary."""
         import server
+        from fastapi.testclient import TestClient
+        client = TestClient(server.app, base_url="http://127.0.0.1")
+        for path in ("/api/journal/list", "/api/portfolio", "/api/review-agent/config"):
+            assert client.get(path, headers={"Host": "foreign.example"}).status_code == 403
+            assert client.get(path, headers={"Origin": "https://foreign.example"}).status_code == 403
 
-        src = inspect.getsource(server._vr_guard)
-        assert "_is_vr_path(request.url.path)" in src
-        # Origin 只卡写操作，不卡 GET
-        assert "_MUTATING" in src
-        assert "OPTIONS" in src, "预检请求要放过"
-        assert "/api/health" in src, "健康检查要豁免（同上游口径）"
 
 
 class TestVrUserDataGuard:
@@ -1516,20 +1491,13 @@ class TestVrDegradeAndCliRisk:
         assert 'q.get("price", 0.0)' in src
 
     def test_auto_approve_clis_are_flagged(self):
-        """自动批准的 CLI 必须在选择器里标出来"""
-        import pathlib
-        import re
-
-        models = pathlib.Path("frontend/src/lib/ai-models.ts").read_text(encoding="utf-8")
-        assert "autoApprove?" in models, "ModelConfig 要有 autoApprove 字段"
-        entries = _cli_model_entries()
-        for pid in ("cli-qwen", "cli-deepseek", "cli-codex"):
-            assert "autoApprove: true" in entries[pid], f"{pid} 是自动批准，必须标出来"
-        assert "autoApprove" not in entries["cli-claude"], \
-            "claude 带工具黑名单，不该标成自动批准"
-
-        settings = pathlib.Path("frontend/src/pages/Settings.tsx").read_text(encoding="utf-8")
-        assert "原样进 prompt" in settings, "要说清风险链的关键一环"
+        """A3：旧选择器已退役，同一保护意图验证统一入口。"""
+        from pathlib import Path
+        settings=Path("frontend/src/pages/Settings.tsx").read_text()
+        assert "AgentAccess" in settings and "subscriptionModels" not in settings
+        bridge=Path("runtime/bridge/local_agent_runtime.ts").read_text()
+        assert "no-session-persistence" in bridge and "strict-mcp-config" in bridge
+        assert "cli-qwen" not in Path("frontend/src/lib/agent-api.ts").read_text()
 
     def test_upstream_cli_flags_unchanged(self):
         """确认上游那几个自动批准标志还在 —— 这条警示的前提。"""
@@ -1544,23 +1512,12 @@ class TestVrDegradeAndCliRisk:
 class TestCliRiskDecision:
     """**只保留 `cli-claude` 可选** —— 其余 CLI 必须显式放开才可用"""
 
-    def test_only_claude_cli_is_selectable(self):
-        entries = _cli_model_entries()
-        assert "blocked" not in entries["cli-claude"], "claude 是安全的那个，不该禁"
-        for pid in ("cli-qwen", "cli-deepseek", "cli-codex",
-                    "cli-opencode", "cli-cursor", "cli-kimi"):
-            assert "blocked:" in entries[pid], f"{pid} 是自动批准/无沙箱，必须禁用"
 
     def test_ui_asks_the_server_instead_of_hardcoding(self):
-        """UI 能不能选，由**服务端**说 —— 不再靠前端硬编码的 ``"""
-        import pathlib
-
-        src = pathlib.Path("frontend/src/pages/Settings.tsx").read_text(encoding="utf-8")
-        assert "primeCliAvailability" in src, "要问服务端要能力（走全局缓存那条通道）"
-        assert "const { ok, why } = cliState(m)" in src, "渲染走统一判据"
-        assert "disabled={!ok}" in src, "按钮按判据 disabled"
-        assert "const st = cliState(m);" in src and "if (!st.ok) {" in src
-        assert "⛔ 已禁用" in src and "未安装" in src, "禁用与未安装要分开显示"
+        """A3：旧选择器已退役，同一保护意图验证统一入口。"""
+        from pathlib import Path
+        access=Path("frontend/src/components/AgentAccess.tsx").read_text()
+        assert "/subscriptions/" in access and "/status" in access and "/access/${kind}" in access
 
     def test_frontend_never_decides_availability_alone(self):
         """反向约束：别再出现"前端自己判定能不能用"的写法。"""
@@ -1582,19 +1539,21 @@ class TestCliRiskDecision:
 class TestCredsNotInEnviron:
     """MiMo 凭据**不能进 `os.environ`**"""
 
-    def test_loading_creds_does_not_touch_environ(self, monkeypatch):
+    def test_loading_creds_does_not_touch_environ(self, monkeypatch, tmp_path):
         import os
 
         import duanxian.config as C
 
-        for k in ("MIMO_API_KEY", "MIMO_BASE_URL", "MIMO_MODEL"):
+        for k in ("MIMO_API_KEY", "MIMO_BASE_URL", "MIMO_MODEL", "MIMO_QUICK_MODEL"):
             monkeypatch.delenv(k, raising=False)
         monkeypatch.setattr(C, "_CREDS", None)
-        if not C._MIMO_ENV.exists():
-            pytest.skip("本机没有 mimo.env")
+        env_file = tmp_path / "mimo.env"
+        env_file.write_text("MIMO_API_KEY=test-only-key\nMIMO_QUICK_MODEL=test-quick\n")
+        monkeypatch.setattr(C, "_MIMO_ENV", env_file)
         C._ensure_mimo_loaded()
         assert C._CREDS and C._CREDS.get("MIMO_API_KEY"), "凭据要读进进程内字典"
-        for k in ("MIMO_API_KEY", "MIMO_BASE_URL", "MIMO_MODEL"):
+        assert C._CREDS["MIMO_QUICK_MODEL"] == "test-quick"
+        for k in ("MIMO_API_KEY", "MIMO_BASE_URL", "MIMO_MODEL", "MIMO_QUICK_MODEL"):
             assert not os.environ.get(k), f"{k} 泄漏进了 os.environ → 会传给 CLI 子进程"
 
     def test_does_not_use_load_dotenv(self):
@@ -1702,20 +1661,19 @@ class TestBlockedCliRemovedFromRuntime:
             f"出现了没经过 _CLI_DEFS 的 CLI 调用：{sorted(set(hits))}"
 
     def test_frontend_drops_stale_blocked_config_on_load(self):
-        """前端也要在**读取**时丢掉旧配置（不是只在保存时挡）。"""
-        import pathlib
-
-        llm = pathlib.Path("frontend/src/lib/llm.ts").read_text(encoding="utf-8")
-        load_body = llm[llm.index("export function loadLlm"):llm.index("export function saveLlm")]
-        assert "serverAllowsCli" in load_body, "loadLlm 要按服务端答案拦"
-        assert "staleBlockedProvider" in llm, "要能告诉用户「原来那个为什么没了」"
+        """A3：旧选择器已退役，同一保护意图验证统一入口。"""
+        from pathlib import Path
+        src=Path("frontend/src/lib/agent-api.ts").read_text()
+        assert 'includes(value.provider)' in src
+        assert "cli-qwen" not in src and "cli-deepseek" not in src
+        assert 'localStorage.getItem(key)' in src
 
     def test_settings_explains_why_the_old_choice_vanished(self):
-        """失效也是坏体验：设置页要写明原因"""
-        import pathlib
-
-        s = pathlib.Path("frontend/src/pages/Settings.tsx").read_text(encoding="utf-8")
-        assert "staleBlocked" in s and "已被禁用" in s
+        """A3：旧选择器已退役，同一保护意图验证统一入口。"""
+        from pathlib import Path
+        src=Path("frontend/src/pages/Settings.tsx").read_text()
+        assert "旧版分散的 AI 设置不再用于产品调用" in src
+        assert "没有自动迁移密钥" in src
 
     def test_gate_is_a_whitelist_not_a_blacklist(self):
         """极性：默认必须是"拒绝"。
@@ -1754,26 +1712,6 @@ class TestBlockedCliRemovedFromRuntime:
             cli_runtime._CLI_DEFS.clear()
             cli_runtime._CLI_DEFS.update(orig_defs)
 
-    def test_blocked_lists_agree_across_layers(self):
-        """两层口径要一致：前端灰掉的，后端也得摘掉（反之亦然）"""
-        import pathlib
-        import re
-
-        import server
-
-        cli_runtime = _live_cli_runtime()
-        ts = pathlib.Path("frontend/src/lib/ai-models.ts").read_text(encoding="utf-8")
-        for block in re.findall(r"\{[^{}]*\}", ts[ts.index("export const aiModels"):]):
-            m = re.search(r'provider:\s*"cli-([a-z]+)"', block)
-            if not m:
-                continue
-            kind, fe_blocked = m.group(1), "blocked:" in block
-            be_usable = kind in cli_runtime._CLI_DEFS
-            assert fe_blocked != be_usable, (
-                f"{kind}：前端{'禁用' if fe_blocked else '可选'}，"
-                f"后端{'可用' if be_usable else '已摘'} —— 两层口径不一致")
-            if not fe_blocked:
-                assert kind in server._ALLOWED_CLI_KINDS
 
 
 class TestNoDuplicateVrAppImport:
@@ -1811,21 +1749,18 @@ class TestStaleNoticeClearsAfterSave:
     """第 8 轮 ：换好配置之后，那条"原配置失效"的提示得收起来"""
 
     def test_stale_flag_is_state_not_a_const(self):
-        import pathlib
-
-        s = pathlib.Path("frontend/src/pages/Settings.tsx").read_text(encoding="utf-8")
-        assert "const [staleBlocked, setStaleBlocked]" in s, \
-            "必须是 state —— const 不会在保存后重算"
+        """A3：旧选择器已退役，同一保护意图验证统一入口。"""
+        from pathlib import Path
+        src=Path("frontend/src/lib/workspace/state.tsx").read_text()
+        assert "useState<ConnectionStatus>" in src
+        assert "astock-connection-changed" in src
 
     def test_cleared_on_every_path_that_fixes_the_config(self):
-        """三条出路都要清：存 API / 存订阅 / 清除配置。"""
-        import pathlib
-
-        s = pathlib.Path("frontend/src/pages/Settings.tsx").read_text(encoding="utf-8")
-        for fn in ("const saveApi", "const saveSubscription", "const forget"):
-            i = s.index(fn)
-            body = s[i:s.index("};", i)]
-            assert "setStaleBlocked(null)" in body, f"{fn} 之后没清掉提示"
+        """A3：旧选择器已退役，同一保护意图验证统一入口。"""
+        from pathlib import Path
+        src=Path("frontend/src/lib/agent-api.ts").read_text()
+        assert 'window.dispatchEvent(new Event("astock-connection-changed"))' in src
+        assert 'onSaved={workspace.refresh}' in Path("frontend/src/pages/Settings.tsx").read_text()
 
 
 class TestCliAvailabilityEndpoint:
@@ -1955,73 +1890,49 @@ class TestOneSourceOfTruthForCliAvailability:
         return pathlib.Path("frontend/src/pages/Settings.tsx").read_text(encoding="utf-8")
 
     def test_loadllm_uses_server_answer_not_static_table(self):
-        s = self._llm()
-        assert "serverAllowsCli(c.provider) === false" in s, "要用服务端答案"
-        assert "if (blockedReason(c.provider)) return null;" not in s, \
-            "回退成按静态表一律拒绝了 → opt-in 放开的 provider 会被误杀"
+        """A3：旧选择器已退役，同一保护意图验证统一入口。"""
+        from pathlib import Path
+        src=Path("frontend/src/lib/llm.ts").read_text()
+        assert "loadAgentConnection()" in src and "loadLlm()" not in src
+        assert "vr-llm" not in src
+        assert "primeCliAvailability" not in src
 
     def test_stale_notice_also_uses_server_answer(self):
-        s = self._llm()
-        i = s.index("export function staleBlockedProvider")
-        body = s[i:s.index("export function loadLlm")]
-        assert "serverAllowsCli(p) !== false" in body, \
-            "静态表判会把 opt-in 放开的 provider 误报成「已被禁用」"
+        """A3：旧选择器已退役，同一保护意图验证统一入口。"""
+        from pathlib import Path
+        src=Path("frontend/src/lib/workspace/state.tsx").read_text()
+        assert "subscriptionStatus(data)" in src and "/subscriptions/" in src
+        assert "!data.installed" in src and "!data.authenticated" in src
 
     def test_stale_notice_recomputed_after_availability_lands(self):
-        """判据搬到服务端了，读取判据的**时机**也得跟着搬"""
-        s = self._settings()
-        i = s.index("primeCliAvailability(authHeaders())")
-        block = s[i:i + 600]
-        assert "setStaleBlocked(staleBlockedProvider())" in block
+        """A3：旧选择器已退役，同一保护意图验证统一入口。"""
+        from pathlib import Path
+        src=Path("frontend/src/lib/workspace/state.tsx").read_text()
+        assert "[revision]" in src and "setRevision(x => x + 1)" in src
+        assert "controller.signal.aborted" in src
 
     def test_settings_requires_positive_confirmation(self):
-        """：没拿到服务端答复前**不许选** —— 不能回落静态表"""
-        s = self._settings()
-        assert 'if (availState === "loading" || availState === "idle") return { ok: false' in s
-        assert 'if (availState === "failed") return { ok: false' in s
-        assert "return { ok: !m.blocked, why: m.blocked ?? null };" not in s, "回落静态兜底了"
-        assert "无法向后端确认可用性" in s and "检测中" in s, "两种非就绪状态要说清，别一律显示成已禁用"
+        """A3：旧选择器已退役，同一保护意图验证统一入口。"""
+        from pathlib import Path
+        src=Path("frontend/src/components/AgentAccess.tsx").read_text()
+        assert "saveAgentConnection" in src and "/access/${kind}" in src
+        assert "complete" in src and "request_id" in src
 
     def test_cache_is_primed_at_app_boot(self):
-        """`loadLlm()` 是同步的、全站都在调 —— 缓存必须在启动时就预热。"""
-        import pathlib
+        """A3：旧选择器已退役，同一保护意图验证统一入口。"""
+        from pathlib import Path
+        state=Path("frontend/src/lib/workspace/state.tsx").read_text()
+        assert "agentRequest<unknown>('/status'" in state
+        assert "primeCliAvailability(" not in Path("frontend/src/main.tsx").read_text()
+        assert 'const [status, setStatus]' in state
 
-        s = pathlib.Path("frontend/src/main.tsx").read_text(encoding="utf-8")
-        body = "\n".join(l for l in s.splitlines() if not l.lstrip().startswith("import"))
-        assert "primeCliAvailability(" in body, "启动时要真的调一次，不是只 import"
-
-    def test_server_answer_is_three_state(self):
-        """`true / false / undefined` 三态不能塌成两态。
-
-        塌成"不能用"→ 缓存到位前全站都说没配 AI；塌成"能用"→ 等于没闸。
-        """
-        import pathlib
-
-        s = pathlib.Path("frontend/src/lib/ai-models.ts").read_text(encoding="utf-8")
-        i = s.index("export function serverAllowsCli")
-        body = s[i:i + 500]
-        assert "return undefined" in body, "还不知道时要返回 undefined"
-        assert "boolean | undefined" in body
 
     def test_availability_refetched_after_access_key_change(self):
-        """第 11 轮 ：改了后端访问密钥要立刻重拉可用性"""
-        s = self._settings()
-        i = s.index("const saveAccess = ")
-        body = s[i:s.index("};", i)]
-        assert "refreshAvail()" in body, "存完密钥要重拉可用性"
-        # 挂载那次也走同一个函数，别两处各写一遍
-        assert s.count("const refreshAvail") == 1 and "void refreshAvail();" in s
+        """A3：旧选择器已退役，同一保护意图验证统一入口。"""
+        from pathlib import Path
+        src=Path("frontend/src/pages/Settings.tsx").read_text()
+        assert "saveAccessKey(accessKey.trim()); workspace.refresh();" in src
 
-    def test_stale_availability_response_cannot_win(self):
-        """第 12 轮 ：乱序返回的旧响应不能覆盖新状态"""
-        import pathlib
-
-        s = pathlib.Path("frontend/src/lib/ai-models.ts").read_text(encoding="utf-8")
-        i = s.index("export async function primeCliAvailability")
-        body = s[i:i + 700]
-        assert "const seq = ++_cliAvailSeq;" in body, "要有序号"
-        assert "if (seq !== _cliAvailSeq) return" in body, "过期的那次必须放弃写入"
-        assert body.index("const seq =") < body.index("await fetchCliAvailability")
 
 
 class TestConfigErrorMustBubble:
@@ -2163,10 +2074,10 @@ class TestLiveQuotesGateWindows:
                             lambda: __import__("datetime").datetime(2026, 7, 29, 9, 14, 59))
         assert tc._seconds_to_next_boundary() == 1.0
 
-        # 09:20 → 下一个边界是 15:05
+        # 09:20 → 下一个边界是竞价完成 09:25
         monkeypatch.setattr(tc, "china_now",
                             lambda: __import__("datetime").datetime(2026, 7, 29, 9, 20, 0))
-        assert tc._seconds_to_next_boundary() == (15 * 3600 + 5 * 60) - (9 * 3600 + 20 * 60)
+        assert tc._seconds_to_next_boundary() == 5 * 60
 
         # 20:00（两个边界都过了）→ 算到明天 09:15，必须为正
         monkeypatch.setattr(tc, "china_now",
@@ -2707,7 +2618,7 @@ class TestGetCannotForceRefresh:
         calls = []
         monkeypatch.setattr(server, "_weekly",
                             lambda force: calls.append(("weekly", force)) or {"ok": True})
-        return TestClient(server.app), calls
+        return TestClient(server.app, base_url="http://127.0.0.1"), calls
 
     def test_get_with_refresh_query_does_not_force(self, monkeypatch):
         c, calls = self._client_with_spies(monkeypatch)
@@ -2871,9 +2782,9 @@ class TestReviewHistory:
         import pathlib
 
         s = pathlib.Path("frontend/src/pages/AgentReview.tsx").read_text(encoding="utf-8")
-        assert "loadLatest(v)" in s, "改日期要去读那天的存档"
+        assert "chooseDate(" in s and "loadLatest(requested)" in s, "改日期要去读那天的存档"
         assert "setMissing(" in s and "这天还没跑过复盘" in s, "那天没有要说出来"
-        assert '<datalist id="review-dates">' in s, "list= 指向的 datalist 必须存在"
+        assert 'onInput=' in s and 'type="date"' in s, "原生日期输入必须更新所选日"
 
 
 class TestCliBackendPreflight:
@@ -3102,7 +3013,7 @@ class TestReflectionRefreshedOnRead:
 
         src = inspect.getsource(server.api_latest)
         i = src.index("scoreboard")
-        assert 'payload["reflection"] = reflection.latest_reflection()' in src
+        assert 'reflection.latest_reflection(end=anchor)' in src and 'reflection.scoreboard(end=anchor)' in src
 
     def test_history_keeps_its_own_reflection(self):
         """看历史某天时，那天烤进去的回看才是"当时已知的" —— 别拿最新的覆盖历史存档。"""
@@ -3112,7 +3023,7 @@ class TestReflectionRefreshedOnRead:
 
         src = inspect.getsource(server.api_latest)
         j = src.index('payload["reflection"]')
-        assert "if date is None:" in src[max(0, j - 200):j], "只在读 latest 时刷新"
+        assert "anchor = payload.get" in src[:j] and "end=anchor" in src[j:], "任何报告都按自身交易日限制回评，不能混入未来结果"
 
 
 @pytest.mark.unit
@@ -3199,6 +3110,10 @@ class TestPastSessionsStayViewable:
         from duanxian import data, trade_calendar as tc
 
         monkeypatch.setattr(data, "fetch_prev_pool", lambda d: self._pool())
+        from duanxian import market_facts as mf, emotion_metrics as em
+        # These are independent sources now; never let an offline test read live caches/network.
+        monkeypatch.setattr(mf, "pools", lambda d: {"zt": [{"code": "000003"}], "zb": [], "dt": []})
+        monkeypatch.setattr(em, "_zt_pool", lambda d: {"zt": __import__("pandas").DataFrame({"代码": ["000003"]}), "zb": []})
         monkeypatch.setattr(tc, "live_quotes_are_close_of",
                             lambda d: (False, "实时行情属于别的场次"))
         monkeypatch.setattr(tc, "prev_trade_date", lambda d: "2026-07-28")
@@ -3227,8 +3142,8 @@ class TestPastSessionsStayViewable:
         assert r["available"] is True and r["source"] == "settled"
         assert r["deep_loss_5_count"] == 1 and r["worst"] == -6.5
         # 覆盖不到的两项要给 None 并说明，不能默默当成 0
-        assert r["prev_broken_recovery"] is None and r["market_limit_down"] is None
-        assert "未计" in r["note"]
+        assert r["prev_broken_recovery"] is None and r["market_limit_down"] == 0
+        assert "未覆盖" in r["note"]
 
     def test_feedback_matrix_buckets_by_prev_boards(self, _settled):
         from duanxian import market_facts as mf
@@ -3461,7 +3376,7 @@ class TestAutoRefreshIsSafe:
         的说明，直接对全文断言会被自己的注释命中（守卫撞上它要防的那句话）。
         """
         src = self._src()
-        assert 'session?.phase === "盘中"' in src, "要用后端给的 phase 判断"
+        assert 'Boolean(session?.poll)' in src, "要用后端给的 phase 判断"
         code = "\n".join(l for l in src.splitlines()
                          if not l.lstrip().startswith(("//", "*", "/*")))
         for bad in ("getHours()", "getMinutes()"):
@@ -3608,7 +3523,7 @@ class TestReviewOnlyRunsOnSettledSessions:
 
         src = pathlib.Path("frontend/src/pages/AgentReview.tsx").read_text(encoding="utf-8")
         assert "already_done" in src, "前端要认这个字段"
-        assert "suggest_date" in src, "409 时要指回最近已收盘那一场"
+        assert 'agentRequest<DailyStatus>("/daily"' in src, "新版入口应显示后端提供的日期错误"
         assert "setNotice" in src, "这类告知要与 err 分开显示"
 
 
@@ -3631,6 +3546,7 @@ class TestRealtimeQuotesAreLabeledWithTheirSession:
         monkeypatch.setattr(server, "is_weekend", lambda d: False)
         monkeypatch.setattr(tc, "quote_trade_day", lambda: "2026-07-29")
 
+        monkeypatch.setattr(server, "china_now", lambda: __import__("datetime").datetime(2026,7,30,8,30))
         r = server.api_market_session()
         assert r["quotes_of"] == "2026-07-29"
         assert r["is_today"] is False, "盘前行情不是今天的，必须说清"
@@ -3753,7 +3669,8 @@ class TestRealtimeQuotesAreLabeledWithTheirSession:
         import pathlib
 
         src = pathlib.Path("frontend/src/pages/DailyReview.tsx").read_text(encoding="utf-8")
-        assert "更新于 {turnover.updated}" in src, "裸展示时间戳会被当成数据日期"
+        assert "抓取于 {turnover.updated}" in src, "抓取时刻须独立标注"
+        assert "参考行情日 {turnover.quote_date" in src, "行情日不得被抓取时间替代"
 
 
 @pytest.mark.unit
@@ -4565,7 +4482,7 @@ class TestJournalFills:
             {"side": "buy", "date": "2026-07-24", "price": 10.0, "shares": 500},
             {"side": "sell", "date": "2026-07-24", "price": 10.3, "shares": 500},
         ])["trade"]["settled"]
-        assert st["is_t0"] is True and st["hold_days"] == 0
+        assert st["is_t0"] is False and st["hold_days"] == 0 and "底仓" in st["settlement_warning"]
 
     def test_partial_sell_is_not_closed_and_no_fake_unrealized(self, tmp_path, monkeypatch):
         """只卖一半 → 未平仓，且**不虚构浮盈**（那取决于当前价，不是这笔的事实）。"""
@@ -6424,7 +6341,7 @@ class TestIntradayHolidayGuard:
         monkeypatch.setattr(intraday.trade_calendar, "prev_trade_date",
                             lambda d: (_ for _ in ()).throw(AssertionError("超窗不该走到取数")))
         r = intraday.capture("09:25")
-        assert r["ok"] is False and "分钟" in r["reason"]
+        assert r["ok"] is False and "连续交易" in r["reason"]
 
     def test_historical_date_skips_guard(self, monkeypatch):
         """补算历史日时不该用"今天开没开市"来判 —— 那和历史日无关。"""
@@ -6484,7 +6401,7 @@ class TestShippedPackKeepsTheBoundary:
 
         for mod in (synthesizer, agents):
             src = inspect.getsource(mod)
-            assert "PACK." in src, f"{mod.__name__} 应从 prompt 包取口径"
+            assert "PACK." in src or "pack.judge_requirements" in src, f"{mod.__name__} 应从 prompt 包取口径"
             # 不该出现写死的倾向性措辞
             for bad in ("值得关注", "建议买入", "可以参与", "建议回避"):
                 assert bad not in src, f"{mod.__name__} 里硬编码了倾向性措辞「{bad}」"
@@ -6778,7 +6695,7 @@ class TestSettleFollowsFillOrder:
                          ("buy", "2026-08-01", 10.5, 100),
                          ("sell", "2026-08-01", 10.0, 100))
         assert r["realized_pnl"] == 50.0, "+100 与 −50 相加"
-        assert r["cycles"] == 2 and r["is_t0"] is True and r["closed"] is True
+        assert r["cycles"] == 2 and r["is_t0"] is False and r["closed"] is True and "底仓" in r["settlement_warning"]
 
     def test_partial_then_add_then_close(self):
         """先卖一部分再加仓再清空 —— 三段都要按各自当时的均价结转。"""

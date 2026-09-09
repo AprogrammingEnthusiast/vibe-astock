@@ -72,7 +72,7 @@ type ModeDraft = {
 
 /** 个人模式卡：把打法写下来 + 按版本分段看业绩。
  *  ⚠️ 不预填任何规则内容 —— 预填等于替使用者决定该怎么交易。*/
-function ModesPanel() {
+function ModesPanel({ revision }: { revision: number }) {
   const [data, setData] = useState<ModesResponse | null>(null);
   const [tick, setTick] = useState(0);
   // 表单草稿。⚠️ 不要用 `Partial<ModeCard>`：ModeCard 的 `versions` 是数组，
@@ -80,11 +80,14 @@ function ModesPanel() {
   const [editing, setEditing] = useState<ModeDraft | null>(null);
   const [msg, setMsg] = useState("");
   useEffect(() => {
+    let alive = true;
     (async () => {
-      try { setData(await agentFetch<ModesResponse>("/api/modes")); } catch { /* ignore */ }
+      try { const next = await agentFetch<ModesResponse>("/api/modes"); if (alive) { setData(next); setMsg(""); } }
+      catch (e) { if (alive) { setData(null); setMsg(e instanceof Error ? e.message : "模式卡加载失败，请刷新重试"); } }
     })();
-  }, [tick]);
-  if (!data) return null;
+    return () => { alive = false; };
+  }, [tick, revision]);
+  if (!data) return msg ? <p role="alert">{msg}</p> : null;
   const perf = data.performance;
   const FIELDS: [keyof ModeDraft, string][] = [
     ["setup", "什么形态才做"], ["entry", "怎么进"], ["exit", "怎么走"],
@@ -131,7 +134,7 @@ function ModesPanel() {
         } />{" "}
         打法改过之后，改动前后的统计不能混在一起算 —— 混了那个平均数谁都用不上。
         写下来并<b>带版本</b>，业绩就能按版本分段，才能回答「上次那个改动到底是好是坏」。
-        写下来同时也给「按计划」一个具体的参照物。
+        写下来同时也给「按计划」一个具体的参照物。修改规则从次日生效，今天及以前的交易仍按原版本统计。
       </p>
 
       {editing && (
@@ -172,6 +175,8 @@ function ModesPanel() {
         <p className="text-[12px] text-muted-foreground">{perf.reason}</p>
       ) : (
         <div className="space-y-3">
+          <p className="text-[11px] text-muted-foreground">{plain(perf.note)}</p>
+          {perf.truncated && <p role="alert" className="text-[11px] text-warning">仅载入最近部分交易，历史样本不完整，暂停版本比较。</p>}
           {safeArray<ModePerf>(perf.cards).map((c) => (
             <div key={c.id} className="rounded-xl border border-border p-3">
               <div className="flex flex-wrap items-center gap-2 text-[12px]">
@@ -231,12 +236,12 @@ function ModesPanel() {
               </div>
               {c.by_version.some((v) => !v.enough) && (
                 <p className="mt-1 text-[10px] text-warning">
-                  * 这个版本不足 {perf.min_per_version} 笔，单看它的读数没有意义。
+                  * 样本不足 {perf.min_per_version} 笔或历史记录未完整载入，暂不作版本比较。
                 </p>
               )}
               {c.compare_blocked && (
                 <p className="mt-1 text-[11px] text-warning">
-                  两个版本里有一个样本不够，<b>暂不比较</b> —— 3 笔对 12 笔的「变差了」没有意义。
+                  版本样本不足或历史记录不完整，<b>暂不比较</b> —— 3 笔对 12 笔的「变差了」没有意义。
                 </p>
               )}
               {c.latest_vs_prev && (
@@ -271,20 +276,26 @@ function ModesPanel() {
 /** MFE/MAE 与盈利回吐：这笔曾经到过哪里、实际拿到了多少。
  *  ⚠️ 偏差必须和结论摆在一起 —— MFE 是日线上界，捕获率被系统性低估。*/
 
-function AtRiskPanel() {
+function AtRiskPanel({ revision }: { revision: number }) {
   const [rep, setRep] = useState<AtRiskReport | null>(null);
   const [base, setBase] = useState("");
   const [tick, setTick] = useState(0);
   const [msg, setMsg] = useState("");
+  const [loadError, setLoadError] = useState("");
   useEffect(() => {
+    let active = true;
     (async () => {
       try {
         const r = await agentFetch<AtRiskReport>("/api/risk/at-risk");
+        if (!active) return;
+        setLoadError("");
         setRep(r);
         if (r.equity_base) setBase(String(r.equity_base));
-      } catch { /* 没持仓就不显示 */ }
+      } catch { if (active) { setRep(null); setLoadError("在险资金读取失败，请刷新重试；当前风险未知。"); } }
     })();
-  }, [tick]);
+    return () => { active = false; };
+  }, [tick, revision]);
+  if (loadError) return <p role="alert" className="text-danger">{loadError}</p>;
   if (!rep?.available) return null;
   const saveBase = async () => {
     setMsg("");
@@ -299,11 +310,11 @@ function AtRiskPanel() {
         <ShieldAlert className="h-3.5 w-3.5" /> 在险资金 · AT RISK
       </div>
       <div className="glass rounded-2xl p-5">
-        <h3 className="text-sm font-bold">最坏情况会亏掉多少</h3>
+        <h3 className="text-sm font-bold">按计划止损估算损失</h3>
         <p className="mb-3 text-[11px] leading-relaxed text-muted-foreground">
-          浮盈浮亏说的是现在，在险资金说的是<b>最坏</b>。
+          此处是按计划价成交的情景估算；跳空、跌停或无法成交时，实际损失可能更大。
           按你自己写下的计划止损算：<code className="text-[10px]">(成本 − 止损价) × 股数</code>。
-          三笔各自「只亏 5%」，同时在场就是 15%。
+          组合风险要按各笔仓位加权：三笔各占账户三分之一、各跌 5%，合计影响约为账户的 5%。
         </p>
         <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
           <div>
@@ -420,13 +431,18 @@ function AtRiskPanel() {
 }
 
 /** 异常交易收件箱。判定基准全部来自使用者自己 —— 只说哪里不寻常，不说该怎么做。*/
-function InboxPanel() {
+function InboxPanel({ revision }: { revision: number }) {
   const [rep, setRep] = useState<Inbox | null>(null);
+  const [loadError, setLoadError] = useState("");
   useEffect(() => {
+    let active = true;
     (async () => {
-      try { setRep(await agentFetch<Inbox>("/api/risk/inbox")); } catch { /* 无记录 */ }
+      try { const next = await agentFetch<Inbox>("/api/risk/inbox"); if (active) { setRep(next); setLoadError(""); } }
+      catch { if (active) { setRep(null); setLoadError("异常交易检查读取失败，请刷新重试。"); } }
     })();
-  }, []);
+    return () => { active = false; };
+  }, [revision]);
+  if (loadError) return <p role="alert" className="text-danger">{loadError}</p>;
   if (!rep?.available || !(rep.count ?? 0)) return null;
   return (
     <div className="glass rounded-2xl p-5">
@@ -497,8 +513,7 @@ function ExcursionPanel() {
       <h3 className="text-sm font-bold">是不是总在最高点前就跑了</h3>
       <p className="mb-3 text-[11px] leading-relaxed text-muted-foreground">
         结果只说了终点。<b>MFE</b> = 这笔最多曾赚到多少，<b>MAE</b> = 最多曾亏到多少。
-        MFE 远高于实际落袋 = <b>盈利回吐</b>（拿不住或卖点随意）；
-        亏钱收场但从没怎么浮盈过 = 进场就不对，不是拿不住。
+        MFE/MAE 基于持有期日线高低价，是区间上界，不代表盘中曾能按该价成交。差额只提示需要回看交易记录，不能直接归因于卖点或进场判断；复权价格与实际成交价的差异也会影响结果。
       </p>
       <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
         <div>
@@ -796,7 +811,14 @@ function RulesEditor({ onSaved }: { onSaved: () => void }) {
         const d: Record<string, string> = {};
         for (const k of Object.keys(safeRecord(m.defaults))) d[k] = String(m.rules?.[k] ?? "");
         setDraft(d);
-      } catch { setMsg("读取失败"); }
+      } catch (error) {
+        setMsg(error instanceof Error ? error.message : "读取失败");
+        try {
+          const schema = await agentFetch<RiskRules>("/api/risk/rules-schema");
+          setMeta(schema);
+          setDraft(Object.fromEntries(Object.keys(schema.defaults).map(k => [k, ""])));
+        } catch { /* Keep the original failure visible; no automatic reset. */ }
+      }
     })();
   }, []);
   if (!meta) return <p className="text-[12px] text-muted-foreground">{msg || "载入中…"}</p>;
@@ -806,7 +828,7 @@ function RulesEditor({ onSaved }: { onSaved: () => void }) {
       const rules: Record<string, number> = {};
       for (const [k, v] of Object.entries(draft)) {
         const n = Number(v);
-        if (!Number.isFinite(n) || n <= 0) { setMsg(`${meta.labels[k] ?? k} 必须是正数`); setSaving(false); return; }
+        if (!v.trim() || !Number.isFinite(n) || n < 0 || (n === 0 && k !== "max_unplanned_ratio")) { setMsg(`${meta.labels[k] ?? k} 请填写有效数值`); setSaving(false); return; }
         rules[k] = n;
       }
       await agentPost("/api/risk/rules", { rules });
@@ -852,20 +874,80 @@ function RulesEditor({ onSaved }: { onSaved: () => void }) {
   );
 }
 
+function RiskRulesPanel({ value, onSaved }: { value: RiskReport["violations"]; onSaved: () => void }) {
+  const [editing, setEditing] = useState(false);
+  const vi = value || { available: false };
+  return (
+        <div className="glass rounded-2xl p-5">
+          <h3 className="text-sm font-bold">
+            你自己的规则
+            <button onClick={() => setEditing((v) => !v)}
+              className={cn("ml-2 cursor-pointer rounded px-1.5 py-0.5 text-[10px] font-normal transition-colors",
+                vi.is_default_rules
+                  ? "bg-warning/15 text-warning hover:bg-warning/25"
+                  : "bg-muted text-muted-foreground hover:text-foreground")}>
+              {vi.is_default_rules
+                ? (editing ? "收起" : "还在用默认阈值 · 点这里改成你自己的")
+                : (editing ? "收起" : "改我的规则")}
+            </button>
+          </h3>
+          {editing && <RulesEditor onSaved={onSaved} />}
+          <p className="mb-3 text-[11px] text-muted-foreground">
+            系统只检查你有没有违反<b>自己写下的</b>规矩，不替你判断该不该交易。
+          </p>
+          {Object.entries(safeRecord<string>(vi.rule_status)).filter(([, status]) => status.startsWith("unavailable")).map(([key, status]) => (
+            <p key={key} role="status" className="mb-2 text-[12px] text-warning">{status.replace(/^unavailable[：:]?/, "核对范围不足：")}</p>
+          ))}
+          {!vi.available ? <p className="text-[12px] text-muted-foreground">{vi.reason || "尚无可核对的交易样本；可以先设置规则。"}</p> : (vi.violation_count ?? 0) === 0 ? (
+            <p className="text-[13px] text-success">{Object.values(vi.rule_status || {}).some(v => v.startsWith("unavailable")) ? "已检查的范围内未发现违规；缺资料的规则不能据此认定通过。" : "已检查的规则暂无违反记录。"}</p>
+          ) : (
+            <div className="max-h-48 space-y-1 overflow-y-auto">
+              {safeArray<Violation>(vi.violations).map((v, i) => (
+                <div key={i} className="flex flex-wrap items-center gap-2 text-[12px] tabular-nums">
+                  <span className="w-20 shrink-0 text-muted-foreground">{v.date}</span>
+                  <span className="rounded bg-danger/15 px-1.5 py-0.5 text-[10px] font-bold text-danger">
+                    {v.label}
+                  </span>
+                  <span className="text-muted-foreground">{v.detail}</span>
+                  <span className="text-[10px] text-muted-foreground/60">
+                    （你的上限 {v.limit}）
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+          {(vi.after_loss_streak?.trades ?? 0) > 0 && (
+            <p className="mt-3 border-t border-border pt-2.5 text-[12px] text-muted-foreground">
+              你连亏 {vi.after_loss_streak!.threshold} 笔后又做了{" "}
+              <b className="text-foreground">{vi.after_loss_streak!.trades}</b> 笔，
+              平均 <b className={tone(vi.after_loss_streak!.avg_pct)}>
+                {signed(vi.after_loss_streak!.avg_pct)}
+              </b>
+              、胜率 <b className="text-foreground">{rate(vi.after_loss_streak!.win_rate)}</b>
+              <span className="ml-1 text-[11px] opacity-70">
+                ← 这是你自己的历史，不是建议
+              </span>
+            </p>
+          )}
+        </div>
+  );
+}
+
 /** 个人风控：权益曲线形状 + 纪律归因 + 自设规则违反。
  *  ⚠️ 只统计使用者自己的交易，不给任何操作建议。⛔ 不接入任何 AI prompt。*/
-function RiskPanel() {
+function RiskPanel({ revision }: { revision: number }) {
   const [rep, setRep] = useState<RiskReport | null>(null);
   const [msg, setMsg] = useState("");
-  const [editing, setEditing] = useState(false);
   const [tick, setTick] = useState(0);
   const reload = () => setTick((t) => t + 1);
   useEffect(() => {
+    let active = true;
     (async () => {
-      try { setRep(await agentFetch<RiskReport>("/api/risk/report")); }
-      catch { setMsg("风控数据读取失败"); }
+      try { const value = await agentFetch<RiskReport>("/api/risk/report"); if (active) { setRep(value); setMsg(""); } }
+      catch (error) { if (active) { setRep(null); setMsg(error instanceof Error ? error.message : "风控数据读取失败，请刷新重试"); } }
     })();
-  }, [tick]);
+    return () => { active = false; };
+  }, [tick, revision]);
   const eq = rep?.equity;
   const dp = rep?.discipline;
   const vi = rep?.violations;
@@ -876,6 +958,7 @@ function RiskPanel() {
         <p className="mt-1 text-[12px] text-muted-foreground">
           {msg || eq?.reason || "填了成交明细并平仓后，这里会给出权益曲线形状、纪律归因和规则检查。"}
         </p>
+        <RiskRulesPanel value={vi} onSaved={reload} />
       </section>
     );
   }
@@ -888,6 +971,7 @@ function RiskPanel() {
 
       <div className="glass rounded-2xl p-5">
         <h3 className="text-sm font-bold">权益曲线的形状</h3>
+        {eq.date_note && <p className="text-[11px] text-muted-foreground">{eq.date_note}</p>}
         <p className="mb-3 text-[11px] text-muted-foreground">
           累计赚多少没什么信息量。真正要看的是回撤多深、多久没创新高、盈利是不是靠少数几笔。
         </p>
@@ -986,58 +1070,7 @@ function RiskPanel() {
         </div>
       )}
 
-      {/* 自设规则违反 */}
-      {vi?.available && (
-        <div className="glass rounded-2xl p-5">
-          <h3 className="text-sm font-bold">
-            你自己的规则
-            <button onClick={() => setEditing((v) => !v)}
-              className={cn("ml-2 cursor-pointer rounded px-1.5 py-0.5 text-[10px] font-normal transition-colors",
-                vi.is_default_rules
-                  ? "bg-warning/15 text-warning hover:bg-warning/25"
-                  : "bg-muted text-muted-foreground hover:text-foreground")}>
-              {vi.is_default_rules
-                ? (editing ? "收起" : "还在用默认阈值 · 点这里改成你自己的")
-                : (editing ? "收起" : "改我的规则")}
-            </button>
-          </h3>
-          {editing && <RulesEditor onSaved={reload} />}
-          <p className="mb-3 text-[11px] text-muted-foreground">
-            系统只检查你有没有违反<b>自己写下的</b>规矩，不替你判断该不该交易。
-          </p>
-          {(vi.violation_count ?? 0) === 0 ? (
-            <p className="text-[13px] text-success">没有违反记录。</p>
-          ) : (
-            <div className="max-h-48 space-y-1 overflow-y-auto">
-              {safeArray<Violation>(vi.violations).map((v, i) => (
-                <div key={i} className="flex flex-wrap items-center gap-2 text-[12px] tabular-nums">
-                  <span className="w-20 shrink-0 text-muted-foreground">{v.date}</span>
-                  <span className="rounded bg-danger/15 px-1.5 py-0.5 text-[10px] font-bold text-danger">
-                    {v.label}
-                  </span>
-                  <span className="text-muted-foreground">{v.detail}</span>
-                  <span className="text-[10px] text-muted-foreground/60">
-                    （你的上限 {v.limit}）
-                  </span>
-                </div>
-              ))}
-            </div>
-          )}
-          {(vi.after_loss_streak?.trades ?? 0) > 0 && (
-            <p className="mt-3 border-t border-border pt-2.5 text-[12px] text-muted-foreground">
-              你连亏 {vi.after_loss_streak!.threshold} 笔后又做了{" "}
-              <b className="text-foreground">{vi.after_loss_streak!.trades}</b> 笔，
-              平均 <b className={tone(vi.after_loss_streak!.avg_pct)}>
-                {signed(vi.after_loss_streak!.avg_pct)}
-              </b>
-              、胜率 <b className="text-foreground">{rate(vi.after_loss_streak!.win_rate)}</b>
-              <span className="ml-1 text-[11px] opacity-70">
-                ← 这是你自己的历史，不是建议
-              </span>
-            </p>
-          )}
-        </div>
-      )}
+      <RiskRulesPanel value={vi} onSaved={reload} />
     </section>
   );
 }
@@ -1078,7 +1111,7 @@ function AppendFill({ trade, onSubmit, onCancel }: {
           </button>
         ))}
       </div>
-      <input type="date" value={date} onChange={(e) => setDate(e.target.value)}
+      <input type="date" value={date} onInput={(e) => setDate(e.currentTarget.value)} onChange={(e) => setDate(e.target.value)}
         className="rounded border border-border bg-card px-2 py-1" />
       <input type="number" step="0.01" placeholder="价" value={price}
         onChange={(e) => setPrice(e.target.value)}
@@ -1105,35 +1138,60 @@ function AppendFill({ trade, onSubmit, onCancel }: {
 
 /** 交易费率。⚠️ 默认值只是能跑起来的初值，**不是推荐值也不是你的真实费率** ——
  *  各家券商佣金差别很大，不改就用初值估算，统计会带着这个偏差。*/
-function FeeConfig() {
-  const [fees, setFees] = useState<Record<string, number> | null>(null);
+function FeeConfig({onSaved}: {onSaved: () => Promise<void>}) {
+  const [fees, setFees] = useState<Record<string, number | string> | null>(null);
   const [labels, setLabels] = useState<Record<string, string>>({});
-  const [isDefault, setIsDefault] = useState(true);
+  const [isDefault, setIsDefault] = useState(false);
+  const [loadError, setLoadError] = useState("");
   const [msg, setMsg] = useState("");
   const [busy, setBusy] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const loadId = useRef(0);
 
   const load = async () => {
+    const id = ++loadId.current;
+    setLoading(true);
     try {
       const r = await agentFetch<{ fees: Record<string, number | boolean>;
                                   labels: Record<string, string> }>("/api/journal/fees");
+      if (id !== loadId.current) return;
       const raw = r.fees || {};
       setIsDefault(Boolean(raw.is_default));
       const nums: Record<string, number> = {};
       for (const [k, v] of Object.entries(raw)) {
         if (k !== "is_default" && typeof v === "number") nums[k] = v;
       }
-      setFees(nums); setLabels(r.labels || {});
-    } catch { /* 读不到就不显示，不阻塞主功能 */ }
+      const keys = Object.keys(r.labels || {});
+      if (!keys.length || keys.some(k => !(k in nums)) || Object.keys(nums).length !== keys.length) throw new Error("费率资料不完整");
+      setFees(nums); setLabels(r.labels); setLoadError("");
+    } catch (e) {
+      if (id !== loadId.current) return;
+      setLoadError(e instanceof Error ? e.message : "费率读取失败");
+      try {
+        const schema = await agentFetch<{labels: Record<string,string>}>("/api/journal/fees-schema");
+        if (id !== loadId.current) return;
+        setLabels(schema.labels);
+        setFees(current => current ?? Object.fromEntries(Object.keys(schema.labels).map(k => [k, ""])));
+      } catch { /* 保留已有输入；loadError 与重试入口仍可见。 */ }
+    } finally { if (id === loadId.current) setLoading(false); }
   };
-  useEffect(() => { load(); }, []);
-  if (!fees) return null;
+  useEffect(() => { load(); return () => { ++loadId.current; }; }, []);
+  if (!fees) return <div className="glass rounded-2xl p-5"><h3>交易费率</h3>
+    <p role="status">{loadError || "正在读取费率…"}</p>
+    {loadError && <button disabled={loading} onClick={load}>重试读取费率</button>}</div>;
 
   const save = async () => {
+    if (!Object.keys(labels).length || Object.keys(labels).some(k => !(k in fees)) || Object.keys(fees).length !== Object.keys(labels).length || Object.values(fees).some(v => String(v).trim() === "")) {
+      setMsg("请填写全部费率项目，确认后再保存"); return;
+    }
     setBusy(true); setMsg("");
     try {
       const r = await agentPost<{ ok?: boolean; error?: string }>("/api/journal/fees", { fees });
       setMsg(r?.error ? r.error : "已保存");
-      if (!r?.error) await load();
+      if (!r?.error) {
+        await load();
+        try { await onSaved(); } catch { setMsg("费率已保存，但交易统计刷新失败，请刷新页面"); }
+      }
     } catch (e) {
       setMsg(e instanceof Error ? e.message : "保存失败");
     } finally { setBusy(false); }
@@ -1160,16 +1218,17 @@ function FeeConfig() {
       <p className="mb-3 mt-1 text-[11px] text-muted-foreground">
         对高换手的短线打法，费用不是小数：一堆薄利交易在计费后可能接近持平甚至转亏。
       </p>
+      {loadError && <div className="mb-3 text-sm text-warning"><p role="alert">{loadError}。读取失败不会修改原文件；可以重试读取，或按自己的账户填写以下项目后保存。</p><button disabled={busy || loading} onClick={load}>重试读取费率</button></div>}
       <div className="flex flex-wrap gap-3">
         {Object.entries(fees).map(([k, v]) => (
           <label key={k} className="flex items-center gap-1.5 text-[12px]">
             <span className="text-muted-foreground">{labels[k] || k}</span>
-            <input type="number" step="any" value={v}
-              onChange={(e) => setFees({ ...fees, [k]: Number(e.target.value) })}
+            <input type="number" step="any" value={v} disabled={busy || loading}
+              onChange={(e) => setFees({ ...fees, [k]: e.target.value })}
               className="w-28 rounded border border-border bg-card px-2 py-1 text-right tabular-nums" />
           </label>
         ))}
-        <button onClick={save} disabled={busy}
+        <button onClick={save} disabled={busy || loading}
           className="flex items-center gap-1 rounded-lg bg-primary px-3 py-1.5 text-[12px] font-semibold text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-50">
           {busy && <Loader2 className="h-3.5 w-3.5 animate-spin" />}保存
         </button>
@@ -1185,7 +1244,10 @@ function FeeConfig() {
 
 export function Journal() {
   const [trades, setTrades] = useState<Trade[]>([]);
+  const [offset, setOffset] = useState(0);
+  const [total, setTotal] = useState(0);
   const [stats, setStats] = useState<JournalStats | null>(null);
+  const [revision, setRevision] = useState(0);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
   const alive = useRef(true);
@@ -1216,33 +1278,39 @@ export function Journal() {
     return () => { alive.current = false; };
   }, []);
 
+  const listRequest = useRef(0);
   async function load() {
+    const requestId = ++listRequest.current;
     try {
       const [l, s] = await Promise.all([
-        agentFetch<{ trades: Trade[] }>("/api/journal/list"),
+        agentFetch<{ trades: Trade[]; total: number }>(`/api/journal/list?limit=200&offset=${offset}`),
         agentFetch<JournalStats>("/api/journal/stats"),
       ]);
-      if (!alive.current) return;
+      if (!alive.current || requestId !== listRequest.current) return;
       setTrades(safeArray<Trade>(l?.trades));
+      setTotal(l.total);
       setStats(s);
+      setRevision(v => v + 1);
     } catch (e) {
       // 账本损坏时后端给 500 + 原因 —— 必须原样显示，别让用户以为记录丢了就重新录
-      if (alive.current) {
+      if (alive.current && requestId === listRequest.current) {
         setMsg(e instanceof Error && e.message
           ? `读取失败：${e.message}（若是账本损坏，先别录新的，去 ~/.duanxian-agents/journal/ 看备份）`
           : "读取失败");
       }
     }
   }
-  useEffect(() => { load(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, []);
+  useEffect(() => { load(); return () => { ++listRequest.current; }; /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [offset]);
 
   async function submit() {
     if (!code.trim()) { setMsg("请填代码"); return; }
+    const parsedPnl = pnl.trim() === "" ? null : Number(pnl.trim().replace(/[%％]$/, ""));
+    if (parsedPnl !== null && !Number.isFinite(parsedPnl)) { setMsg("盈亏请填写有效数字，例如 3.2 或 3.2%"); return; }
     setBusy(true); setMsg("");
     try {
       const r = await agentPost<{ ok?: boolean; error?: string }>("/api/journal/add", {
         date, code, name, playbook,
-        pnl_pct: pnl.trim() === "" ? null : Number(pnl),
+        pnl_pct: parsedPnl,
         as_planned: planned, note,
         // 只把填全的成交行发上去（价量都 >0）
         fills: fills.filter((f) => f.price > 0 && f.shares > 0),
@@ -1287,9 +1355,12 @@ export function Journal() {
   }
 
   async function remove(id: string) {
+    if (!window.confirm("确认删除这笔交易及其成交明细？删除后无法恢复，并会重新计算持仓和统计。")) return;
     try {
-      await agentPost(`/api/journal/delete?trade_id=${encodeURIComponent(id)}`, {});
-      await load();
+      const result = await agentPost<{ok?: boolean; error?: string; reason?: string}>(`/api/journal/delete?trade_id=${encodeURIComponent(id)}`, {});
+      if (result.ok !== true) { setMsg(result.error || result.reason || "删除失败，原记录仍保留"); return; }
+      if (trades.length === 1 && offset > 0) setOffset(Math.max(0, offset - 200));
+      else await load();
     } catch { setMsg("删除失败"); }
   }
 
@@ -1308,7 +1379,7 @@ export function Journal() {
       <section className="glass rounded-2xl p-5">
         <h3 className="mb-3 text-sm font-bold">记一笔</h3>
         <div className="flex flex-wrap gap-2">
-          <input type="date" value={date} onChange={(e) => setDate(e.target.value)}
+          <input type="date" value={date} onInput={(e) => setDate(e.currentTarget.value)} onChange={(e) => setDate(e.target.value)}
             className="rounded-lg border border-border bg-card px-3 py-2 text-sm" />
           <input value={code} onChange={(e) => setCode(e.target.value)} placeholder="代码 如 002879"
             className="w-32 rounded-lg border border-border bg-card px-3 py-2 text-sm" />
@@ -1362,7 +1433,7 @@ export function Journal() {
           <div className="mb-2 flex flex-wrap items-center gap-2">
             <span className="text-[12px] font-semibold">成交明细</span>
             <span className="text-[11px] text-muted-foreground">
-              填了就自动算加权成本 / 已实现盈亏 / 持有天数（支持分批、做T、隔日卖）
+              有成交明细时，以明细扣费计算的盈亏覆盖手填盈亏%；未卖出部分不计已实现盈亏。自动算加权成本 / 已实现盈亏 / 持有天数（支持分批与隔日卖；同日买卖需核实可卖底仓）
             </span>
             <button onClick={() => addFill("buy")}
               className="rounded border border-success/40 px-2 py-0.5 text-[11px] text-success hover:bg-success/10">
@@ -1379,7 +1450,7 @@ export function Journal() {
                 f.side === "buy" ? "bg-success/15 text-success" : "bg-danger/15 text-danger")}>
                 {f.side === "buy" ? "买" : "卖"}
               </span>
-              <input type="date" value={f.date} onChange={(e) => setFill(i, { date: e.target.value })}
+              <input type="date" value={f.date} onInput={(e) => setFill(i, { date: e.currentTarget.value })} onChange={(e) => setFill(i, { date: e.target.value })}
                 className="rounded border border-border bg-card px-2 py-1 text-[12px]" />
               <input type="number" step="0.01" placeholder="价"
                 value={f.price || ""} onChange={(e) => setFill(i, { price: Number(e.target.value) })}
@@ -1456,26 +1527,31 @@ export function Journal() {
             <BucketRows title="按打法" hint="打板 / 低吸 / 接力，哪个更适合你。" data={stats.by_playbook} />
             <BucketRows title="按是否按计划" hint="「计划外」的单子是不是亏得更多——最容易发现纪律问题的一组。" data={stats.by_planned} />
             <BucketRows title="按当时板位" hint="你买的时候它是首板还是高位板。" data={stats.by_boards} />
-            <BucketRows title="按持有周期" hint="做T和隔日是两种完全不同的打法，混在一起看不出哪种适合你。" data={stats.by_hold} />
+            <BucketRows title="按持有周期" hint="按自然日分组；同日买卖不等于已核实可执行的做T。" data={stats.by_hold} />
           </div>
         </section>
       )}
 
       {/* 在险资金：讲的是"最坏"，比浮盈浮亏更要紧，所以排在最前 */}
-      <AtRiskPanel />
+      <AtRiskPanel revision={revision} />
 
       {/* 异常交易收件箱 */}
-      <InboxPanel />
+      <InboxPanel revision={revision} />
 
       {/* 个人风控：权益曲线 / 纪律归因 / 规则违反 */}
-      <RiskPanel />
+      <RiskPanel revision={revision} />
 
       {/* 个人模式卡 */}
-      <ModesPanel />
+      <ModesPanel revision={revision} />
 
       {/* 流水 */}
       <section>
         <div className="mb-2 text-[11px] font-bold uppercase tracking-[0.2em] text-primary">交易流水 · Trades</div>
+        <div className="mb-3 flex items-center gap-3 text-sm">
+          <span>共 {total} 笔 · 当前 {total ? offset + 1 : 0}–{offset + trades.length}</span>
+          <button disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - 200))} className="disabled:opacity-30">上一页</button>
+          <button disabled={offset + trades.length >= total} onClick={() => setOffset(offset + 200)} className="disabled:opacity-30">下一页</button>
+        </div>
         {trades.length === 0 ? (
           <div className="glass rounded-2xl py-12 text-center text-muted-foreground">
             还没有记录。记第一笔试试 —— 环境会自动钉上去。
@@ -1523,7 +1599,7 @@ export function Journal() {
                             </span>
                           )}
                           {t.settled.hold_days != null
-                            && (t.settled.is_t0 ? " · 做T" : ` · 持${t.settled.hold_days}天`)}
+                            && ` · 持${t.settled.hold_days}天${t.settled.settlement_warning ? " · 部分卖出可卖底仓未核实" : ""}`}
                           {t.settled.closed === false && <span className="text-warning"> · 未平</span>}
                         </>
                         : t.settled?.has_fills
@@ -1579,7 +1655,7 @@ export function Journal() {
         )}
       </section>
 
-      <FeeConfig />
+      <FeeConfig onSaved={load} />
 
       <p className="border-t border-border pt-4 text-xs text-muted-foreground/70">
         数据只存在本机 <code>~/.duanxian-agents/journal/</code>，不上传。

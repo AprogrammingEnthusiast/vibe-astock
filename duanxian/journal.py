@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import datetime
 import json
+import math
 import os
 import threading
 import uuid
@@ -63,41 +64,46 @@ _FEE_LABELS = {
 
 
 def load_fees() -> dict:
-    """读用户自己的费率。没配过就返回初值，并标 `is_default`。"""
-    cfg = dict(DEFAULT_FEES)
+    """仅文件不存在时使用初值；已有配置异常不得悄悄改变结算费用。"""
     try:
-        if os.path.isfile(_FEE_PATH):
-            with open(_FEE_PATH, encoding="utf-8") as fh:
-                saved = json.load(fh)
-            if isinstance(saved, dict):
-                for k in DEFAULT_FEES:
-                    if isinstance(saved.get(k), (int, float)):
-                        cfg[k] = float(saved[k])
-                cfg["is_default"] = False
-                return cfg
-    except Exception:  # noqa: BLE001  配置坏了退回初值，但要标出来
-        pass
-    cfg["is_default"] = True
-    return cfg
+        with open(_FEE_PATH, encoding="utf-8") as fh:
+            saved = json.load(fh)
+    except FileNotFoundError:
+        return {**DEFAULT_FEES, "is_default": True}
+    except (OSError, ValueError) as exc:
+        raise ValueError("交易费率配置无法读取，原件保留；请在交易费率中重新填写完整配置并保存") from exc
+    if not isinstance(saved, dict) or any(k not in saved for k in DEFAULT_FEES):
+        raise ValueError("交易费率配置不完整，原件保留；请重新填写完整配置并保存")
+    cfg = {}
+    for k in DEFAULT_FEES:
+        v = saved[k]
+        if (isinstance(v, bool) or not isinstance(v, (int, float))
+                or not math.isfinite(v) or v < 0 or (k.endswith("_rate") and v > 0.01)):
+            raise ValueError(f"{_FEE_LABELS[k]} 配置无效，原件保留；请重新填写完整配置并保存")
+        cfg[k] = float(v)
+    return {**cfg, "is_default": False}
 
 
 def save_fees(cfg: dict) -> dict:
     """保存费率。只收已知字段，负数与非数字一律拒绝。"""
+    if not isinstance(cfg, dict):
+        raise ValueError("请填写完整费率配置")
     out = {}
     for k in DEFAULT_FEES:
         v = (cfg or {}).get(k)
-        if v is None or v == "":
-            out[k] = DEFAULT_FEES[k]
+        if v is None or (isinstance(v, str) and not v.strip()):
             continue
         try:
             f = float(v)
         except (TypeError, ValueError) as exc:
             raise ValueError(f"{_FEE_LABELS[k]} 必须是数字") from exc
-        if f != f or f < 0:
+        if isinstance(v, bool) or not math.isfinite(f) or f < 0:
             raise ValueError(f"{_FEE_LABELS[k]} 不能是负数")
         if k.endswith("_rate") and f > 0.01:
             raise ValueError(f"{_FEE_LABELS[k]} 看起来不像费率（{f}）—— 万 2.5 应填 0.00025")
         out[k] = f
+    if len(out) != len(DEFAULT_FEES):
+        raise ValueError("请填写全部费率项目，缺项不会自动使用初值")
     os.makedirs(_DIR, exist_ok=True)
     if not atomic_write_json(_FEE_PATH, out):
         raise RuntimeError("费率写入失败")
@@ -329,6 +335,7 @@ def _settle(fills: list[dict], fees_cfg: Optional[dict] = None) -> dict:
     """
     if not fills:
         return {"has_fills": False, "closed": False}
+    fills = sorted(fills, key=lambda f: f["date"])  # 同日仍按录入先后结算
     buys = [f for f in fills if f["side"] == "buy"]
     if not buys:
         # 只有卖出、没有买入 —— 无从结算，如实说明而不是给一个 0
@@ -348,7 +355,13 @@ def _settle(fills: list[dict], fees_cfg: Optional[dict] = None) -> dict:
     peak_capital = 0.0      # 峰值占用资金
     cycles = 0              # 持仓周期数（平仓后再买算新的一轮）
 
+    sellable = 0.0
+    inventory_day = None
+    unverified_sales = []
     for n, f in enumerate(fills, 1):
+        if f["date"] != inventory_day:
+            inventory_day = f["date"]
+            sellable = pos_shares
         if f["side"] == "buy":
             if pos_shares <= 1e-9:
                 cycles += 1
@@ -359,8 +372,11 @@ def _settle(fills: list[dict], fees_cfg: Optional[dict] = None) -> dict:
         else:
             if f["shares"] > pos_shares + 1e-6:
                 raise ValueError(
-                    f"第 {n} 笔卖出 {f['shares']:g} 股，超过当时持有的 "
+                    f"按日期结算的第 {n} 笔卖出 {f['shares']:g} 股，超过当时持有的 "
                     f"{pos_shares:g} 股 —— 请检查成交明细的顺序与数量")
+            if f["shares"] > sellable + 1e-6:
+                unverified_sales.append(f["date"])
+            sellable = max(0, sellable - f["shares"])
             unit = pos_cost / pos_shares            # 卖出那一刻的持仓均价
             ratio = f["shares"] / pos_shares        # 这次卖掉了当前持仓的几成
             realized_pnl += (f["price"] - unit) * f["shares"]
@@ -415,9 +431,11 @@ def _settle(fills: list[dict], fees_cfg: Optional[dict] = None) -> dict:
             d0 = datetime.datetime.strptime(buys[0]["date"], "%Y-%m-%d")
             d1 = datetime.datetime.strptime(sells[-1]["date"], "%Y-%m-%d")
             out["hold_days"] = (d1 - d0).days
-            out["is_t0"] = out["hold_days"] == 0      # 当日买卖 = 做 T
         except ValueError:
             pass
+        out["is_t0"] = False  # 同日买卖不能证明有隔夜底仓可做T
+        if unverified_sales:
+            out["settlement_warning"] = "部分卖出未证明有足够隔夜可卖底仓，不认定为可执行的A股做T"
     return out
 
 
@@ -425,7 +443,7 @@ def add_trade(date: str, code: str, name: str, playbook: str,
               pnl_pct: Optional[float] = None, as_planned: Optional[bool] = None,
               note: str = "", fills: Optional[list[dict]] = None,
               planned_stop: Optional[float] = None,
-              planned_target: Optional[float] = None) -> dict:
+              planned_target: Optional[float] = None, import_id: str | None = None) -> dict:
     """记一笔交易，并**自动钉上当时的市场环境**。
 
     两种记法（都支持，按你手边有什么填）：
@@ -440,6 +458,8 @@ def add_trade(date: str, code: str, name: str, playbook: str,
     ⚠️ 必须是当时写下的值；在险资金按 `planned_stop` 计算，事后补填会让该口径失真。
     没写就留空。
     """
+    if import_id is not None and (not isinstance(import_id, str) or len(import_id) != 64 or any(c not in "0123456789abcdef" for c in import_id)):
+        raise ValueError("导入记录标识无效")
     date = validate_trade_date(date)
     if playbook not in PLAYBOOKS:
         raise ValueError(f"打法需为 {PLAYBOOKS} 之一，得到 {playbook!r}")
@@ -488,8 +508,12 @@ def add_trade(date: str, code: str, name: str, playbook: str,
                         if settled.get("last_sell") and settled["last_sell"] != (
                             settled.get("first_buy") or date) else None),
     }
+    if import_id is not None:
+        trade["legacy_import_id"] = import_id
     with _LOCK:
         trades = _load_raw()
+        if import_id is not None and any(t.get("legacy_import_id") == import_id for t in trades):
+            return {"ok": True, "skipped": True}
         trades.append(trade)
         if not _save(trades):
             raise RuntimeError("账本写入失败（磁盘满或权限问题），这一笔没记上")
@@ -581,10 +605,10 @@ def all_trades() -> list[dict]:
                   reverse=True)
 
 
-def list_trades(limit: int = 200) -> dict:
+def list_trades(limit: Optional[int] = 200, offset: int = 0) -> dict:
     trades = sorted(_load_raw(), key=lambda t: (t.get("date", ""), t.get("created_at", "")),
                     reverse=True)
-    return {"trades": trades[:limit], "total": len(trades)}
+    return {"trades": trades[offset:None if limit is None else offset + limit], "total": len(trades), "offset": offset}
 
 
 def _bucket_stats(rows: list[dict]) -> dict:
@@ -650,7 +674,7 @@ def stats() -> dict:
         st = t.get("settled") or {}
         hd = st.get("hold_days")
         by_hold.setdefault(
-            "做T(当日)" if hd == 0 else ("隔日" if hd == 1 else
+            "同日买卖(底仓待核)" if hd == 0 else ("隔日" if hd == 1 else
                                        (f"持有{hd}天" if isinstance(hd, int) else "未填明细")),
             [],
         ).append(t)

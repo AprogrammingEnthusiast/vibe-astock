@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from statistics import mean, median
 from typing import Optional
 
@@ -56,6 +57,22 @@ def _drift_minutes(slot: str, now_hhmm: str) -> Optional[int]:
         return None
     d = (nh * 60 + nm) - (sh * 60 + sm)
     return d if d >= 0 else None
+
+
+def _valid_session_window(slot: str, captured: str) -> bool:
+    """只接纳成交时段；午收/日收快照允许取数延迟八分钟。"""
+    shape = r"(?:[01][0-9]|2[0-3]):[0-5][0-9]"
+    if not re.fullmatch(shape, slot) or not re.fullmatch(shape, captured):
+        return False
+    drift = _drift_minutes(slot, captured)
+    if drift is None or drift > _MAX_DRIFT_MIN:
+        return False
+    if slot == "09:25":
+        return "09:25" <= captured < "09:30"
+    if slot in {"11:30", "15:00"}:
+        return True
+    return (("09:30" <= slot < "11:30" and captured < "11:30") or
+            ("13:00" <= slot < "15:00" and captured < "15:00"))
 
 
 def _day_dir(date: str) -> str:
@@ -90,11 +107,21 @@ def capture(slot: Optional[str] = None, date: Optional[str] = None) -> dict:
 
     # ⚠️ slot 与真实抓取时刻的偏差要有上限。10:30 打开页面却抓一张标着 "09:25" 的快照，
     # 前端会当成竞价读数展示"高开占比"——那是彻头彻尾的假事实。
-    drift = _drift_minutes(slot, now.strftime("%H:%M"))
+    clock = now.strftime("%H:%M")
+    if clock < slot:
+        return {"ok": False, "reason": f"当前 {clock} 尚未到 {slot}，请到时再抓取"}
+    if clock < "09:25":
+        return {"ok": False, "reason": "竞价尚未完成，试撮合报价不能记为开盘快照"}
+    if slot == "09:25" and clock >= "09:30":
+        return {"ok": False, "reason": "已进入连续交易，不能补抓 09:25 竞价快照"}
+    drift = _drift_minutes(slot, clock)
     if drift is None or drift > _MAX_DRIFT_MIN:
         return {"ok": False,
                 "reason": f"当前 {now.strftime('%H:%M')} 距 {slot} 已超 {_MAX_DRIFT_MIN} 分钟，"
                           f"不能当作该时点的快照"}
+
+    if not _valid_session_window(slot, clock):
+        return {"ok": False, "reason": "当前不在有效成交时段，午休和夜间行情不能保存为盘中快照"}
 
     prev = trade_calendar.prev_trade_date(date)
     if not prev:
@@ -118,10 +145,17 @@ def capture(slot: Optional[str] = None, date: Optional[str] = None) -> dict:
                    if live is not None else None)
 
     prev_zt = pp["zt"]
-    pct = batch_pct([r["code"] for r in prev_zt])
+    codes = [r["code"] for r in prev_zt]
+    pct = batch_pct(codes, opening_date=date) if slot == "09:25" else batch_pct(codes)
+    now = china_now()
+    if slot == "09:25" and now.strftime("%H:%M") >= "09:30":
+        return {"ok": False, "reason": "抓取跨过开盘时点，本次未保存为竞价快照"}
+    drift = _drift_minutes(slot, now.strftime("%H:%M"))
+    if now.strftime("%Y-%m-%d") != date or not _valid_session_window(slot, now.strftime("%H:%M")):
+        return {"ok": False, "reason": "取数超过该时点的有效窗口，本次未保存快照"}
     got = [(r, pct[r["code"]]) for r in prev_zt if r["code"] in pct]
     if not got:
-        return {"ok": False, "reason": "实时行情全部取数失败"}
+        return {"ok": False, "reason": "未取得有效09:25开盘价，可能尚未发布或取数失败；窗口内可重试" if slot == "09:25" else "未取得有效的实时行情"}
 
     vals = [v for _, v in got]
     # 按昨日板位分组看强弱 —— 首板和高位板的竞价含义完全不同
@@ -142,7 +176,9 @@ def capture(slot: Optional[str] = None, date: Optional[str] = None) -> dict:
         "date": date,
         "slot": slot,
         "captured_at": now.strftime("%Y-%m-%d %H:%M:%S") + " CST",
-        "drift_minutes": drift,      # 真实抓取时刻距标称 slot 差几分钟
+        "basis_key": "open_vs_prev_close" if slot == "09:25" else "latest_vs_prev_close",
+        "price_basis": "当日开盘价 / 昨收" if slot == "09:25" else "抓取时最新价 / 昨收",
+        "drift_minutes": _drift_minutes(slot, now.strftime("%H:%M")),      # 真实抓取时刻距标称 slot 差几分钟
         "prev_date": prev,
         "sample": len(vals),
         "avg": round(mean(vals), 2),
@@ -167,10 +203,15 @@ def capture(slot: Optional[str] = None, date: Optional[str] = None) -> dict:
     }
     try:
         os.makedirs(_day_dir(date), exist_ok=True)
-        atomic_write_json(_slot_path(date, slot), snap)
-    except Exception:  # noqa: BLE001  落盘失败不影响返回
-        pass
+        if not atomic_write_json(_slot_path(date, slot), snap):
+            raise OSError("snapshot persistence failed")
+    except OSError:  # 保存失败不能冒充已记录
+        return {"ok": False, "reason": "快照保存失败，请检查本地目录权限或磁盘空间后重试"}
     return {"ok": True, "snapshot": snap}
+
+
+def _opening_basis(snap: dict) -> bool:
+    return snap.get("basis_key") == "open_vs_prev_close" or ("basis_key" not in snap and snap.get("price_basis") == "当日开盘价 / 昨收")
 
 
 def load_day(date: Optional[str] = None) -> dict:
@@ -178,8 +219,9 @@ def load_day(date: Optional[str] = None) -> dict:
     date = date or china_today()
     d = _day_dir(date)
     if not os.path.isdir(d):
-        return {"date": date, "slots": []}
+        return {"date": date, "slots": [], "warnings": []}
     out = []
+    warnings = []
     for fn in sorted(os.listdir(d)):
         if not fn.endswith(".json"):
             continue
@@ -187,11 +229,22 @@ def load_day(date: Optional[str] = None) -> dict:
             with open(os.path.join(d, fn), encoding="utf-8") as fh:
                 s = json.load(fh)
             if s.get("schema") == _SNAP_SCHEMA:
+                slot = str(s.get("slot", ""))
+                if not re.fullmatch(r"(?:[01][0-9]|2[0-3]):[0-5][0-9]", slot):
+                    warnings.append(f"存档 {fn} 时点格式无效，原件保留，不纳入本次核验。")
+                    continue
+                captured = str(s.get("captured_at", ""))[11:16]
+                if (s.get("date") != date or str(s.get("captured_at", ""))[:10] != date or
+                    not _valid_session_window(slot, captured) or
+                    (slot == "09:25" and (not _opening_basis(s) or captured >= "09:30"))):
+                    warnings.append(f"{slot} 旧快照未证明为有效成交时点，原件保留，不纳入竞价核验或情绪路径。")
+                    continue
                 out.append(s)
         except Exception:  # noqa: BLE001
+            warnings.append(f"存档 {fn} 读取或解析失败，原件保留，不纳入本次核验。")
             continue
     out.sort(key=lambda s: s.get("slot", ""))
-    return {"date": date, "slots": out}
+    return {"date": date, "slots": out, "warnings": warnings}
 
 
 def auction_check(date: Optional[str] = None) -> dict:
@@ -208,6 +261,10 @@ def auction_check(date: Optional[str] = None) -> dict:
     date = date or china_today()
     day = load_day(date)
     snap = next((s for s in day["slots"] if s["slot"] == "09:25"), None)
+    # load_day通常已过滤；此守卫也保护独立调用/替代加载器，不用未知basis做核验。
+    if snap is not None and not _opening_basis(snap):
+        return {"available": False, "warnings": day.get("warnings", []),
+                "reason": "旧竞价快照未证明使用09:25开盘成交价，已保留原件但不参与核验。"}
     if snap is None:
         # ⚠️ 缺存档就**如实说缺**，绝不现抓充数：10:30 抓一张标成 "09:25" 的快照，
         # 前端会把盘中实时涨幅当竞价"高开占比"展示。
@@ -215,7 +272,8 @@ def auction_check(date: Optional[str] = None) -> dict:
         r = capture("09:25", date)
         if not r.get("ok"):
             return {"available": False,
-                    "reason": f"09:25 竞价快照缺失（{r.get('reason', '未知')}）。"
+                    "warnings": day.get("warnings", []),
+                    "reason": ("09:25 旧快照已排除，未取得有效竞价记录。" if any(w.startswith("09:25 ") for w in day.get("warnings", [])) else "") + f"09:25 竞价快照缺失（{r.get('reason', '未知')}）。"
                               "盘中快照只在当天该时点前后有效，过点补不回来。"}
         snap = r["snapshot"]
 
@@ -244,6 +302,7 @@ def auction_check(date: Optional[str] = None) -> dict:
 
     return {
         "available": True,
+        "warnings": day.get("warnings", []),
         "date": date,
         "prev_date": prev,
         "captured_at": snap.get("captured_at"),
@@ -272,10 +331,11 @@ def path_summary(date: Optional[str] = None) -> dict:
     day = load_day(date)
     slots = day["slots"]
     if not slots:
-        return {"available": False, "reason": "当天还没有快照（盘中才会产生）", "date": day["date"]}
+        return {"available": False, "reason": "当天还没有有效快照（盘中才会产生）", "warnings": day.get("warnings", []), "date": day["date"]}
     return {
         "available": True,
         "date": day["date"],
+        "warnings": day.get("warnings", []),
         "points": [
             {"slot": s["slot"], "median": s["median"], "avg": s["avg"],
              # 09:25=高开率，其余时点=红盘率（相对昨收），前端按 slot 显示不同标签

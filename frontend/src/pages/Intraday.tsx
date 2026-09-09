@@ -40,7 +40,7 @@ interface PathPoint {
   live?: LiveCounts | null;
   coverage_rate?: number | null;
 }
-interface DayPath { available: boolean; reason?: string; date?: string; points?: PathPoint[]; }
+interface DayPath { warnings?: string[]; available: boolean; reason?: string; date?: string; points?: PathPoint[]; }
 
 function signed(v?: number | null): string {
   const n = finite(v);
@@ -105,7 +105,7 @@ export function Intraday() {
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
           <h1 className="flex items-center gap-2 text-2xl font-bold">
-            <Sunrise className="h-6 w-6 text-primary" /> 开盘核验
+            <Sunrise className="h-6 w-6 text-primary" /> 复盘验证
           </h1>
           <p className="mt-0.5 text-sm text-muted-foreground">
             昨晚的判断，今早开盘就见分晓的那部分 · 昨日涨停股竞价强弱 + 盘中情绪路径
@@ -269,6 +269,7 @@ export function Intraday() {
         </section>
       )}
 
+      {path?.warnings?.map((warning,i)=><p key={i} className="my-2 text-xs text-warning">{warning}</p>)}
       {path && !path.available && !ov && (
         <div className="glass rounded-2xl py-12 text-center text-muted-foreground">
           {path.reason}

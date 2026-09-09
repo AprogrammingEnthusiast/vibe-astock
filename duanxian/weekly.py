@@ -46,7 +46,7 @@ def _followthrough(code: str, appear_date: str, end_date: str) -> list[dict]:
         return []
 
 
-LINEAGE_SCHEMA = 2
+LINEAGE_SCHEMA = 3
 
 
 def peak_drawdown(series: list[dict]) -> tuple[Optional[float], Optional[float]]:
@@ -86,9 +86,12 @@ def build_weekly(n: int = 5) -> dict:
                 n_zb = int(zt.get("zb_count", 0) or 0)
                 br = round(n_zb / (n_zb + n_zt), 3) if (n_zb + n_zt) else 0
             ladder = zt.get("ladder", [])
-            top = ladder[0] if ladder else None
+            tops = [t for t in ladder if t.get("consec_boards") == hc]
+            leaders = [{"code": t["code"], "name": t["name"], "boards": t["consec_boards"],
+                        "sector": t.get("sector", "")} for t in tops]
+            top = tops[0] if tops else None
             daily.append({
-                "date": d, "limit_up": n_zt, "broken_rate": br, "highest_consec": hc,
+                "date": d, "leaders": leaders, "limit_up": n_zt, "broken_rate": br, "highest_consec": hc,
                 "leader": ({"code": top["code"], "name": top["name"],
                             "boards": top["consec_boards"], "sector": top.get("sector", "")}
                            if top else None),
@@ -98,30 +101,31 @@ def build_weekly(n: int = 5) -> dict:
                           "broken_rate": None, "highest_consec": None,
                           "leader": None, "unavailable": True})
 
-    current_top_code = None
-    for row in reversed(daily):
-        if row.get("leader"):
-            current_top_code = row["leader"]["code"]
-            break
-
-    # 龙头谱系：每个"当日最高标龙头"（去重，取其最早出现日）+ 此后走势
+    current_top_codes = {x["code"] for x in daily[-1].get("leaders", [])}
+    warnings = []
+    if daily[-1].get("unavailable"):
+        warnings.append(f"最近交易日 {dates[-1]} 涨停池未取得，当前最高标未知")
     lineage = []
     seen = set()
+    series_requests = 0
     end_date = dates[-1]
     for row in daily:
-        ld = row.get("leader")
-        if not ld or ld["code"] in seen:
-            continue
-        seen.add(ld["code"])
-        series = _followthrough(ld["code"], row["date"], end_date)
-        cum = series[-1]["cum_ret"] if series else None
-        peak, drawdown = peak_drawdown(series)
-        lineage.append({
-            "code": ld["code"], "name": ld["name"], "sector": ld["sector"],
-            "appear_date": row["date"], "boards_then": ld["boards"],
-            "cum_return_since": cum, "series": series,
-            "peak_cum_ret": peak, "drawdown_from_peak": drawdown,
-            "is_current_top": ld["code"] == current_top_code,
-        })
+        for ld in row.get("leaders", []):
+            if ld["code"] in seen:
+                continue
+            seen.add(ld["code"])
+            covered = series_requests < 40
+            series = _followthrough(ld["code"], row["date"], end_date) if covered else []
+            series_requests += 1
+            cum = series[-1]["cum_ret"] if series else None
+            peak, drawdown = peak_drawdown(series)
+            lineage.append({
+                "code": ld["code"], "name": ld["name"], "sector": ld["sector"],
+                "appear_date": row["date"], "boards_then": ld["boards"],
+                "cum_return_since": cum, "series": series,
+                "series_warning": ("" if series else "后续收盘行情未取得，无法计算走势") if covered else "本次最多查询40只走势；名单保留，该票走势未查询",
+                "peak_cum_ret": peak, "drawdown_from_peak": drawdown,
+                "is_current_top": ld["code"] in current_top_codes,
+            })
 
-    return {"days": daily, "leader_lineage": lineage, "lineage_schema": LINEAGE_SCHEMA}
+    return {"days": daily, "leader_lineage": lineage, "lineage_schema": LINEAGE_SCHEMA, "warnings": warnings}

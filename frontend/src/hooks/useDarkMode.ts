@@ -1,19 +1,16 @@
 import { useEffect, useState } from "react";
 
-// 默认浅色；用户可切暗色，选择存 localStorage。
-// 机制：亮色时给 <html> 加 .light（暗色为无类名的默认态）。
+// Keep existing AStock browser preference; new installations match Research's dark default.
 export function useDarkMode() {
   const [dark, setDark] = useState(() => {
-    const saved = localStorage.getItem("vr-theme");
-    if (saved) return saved === "dark";
-    return false; // 默认浅色
+    try { const saved = localStorage.getItem("vr-theme"); return saved ? saved === "dark" : true; }
+    catch { return true; }
   });
-
   useEffect(() => {
     document.documentElement.classList.toggle("light", !dark);
     document.documentElement.classList.toggle("dark", dark);
-    localStorage.setItem("vr-theme", dark ? "dark" : "light");
+    try { localStorage.setItem("vr-theme", dark ? "dark" : "light"); }
+    catch { /* Theme still works for this page when storage is unavailable. */ }
   }, [dark]);
-
-  return { dark, toggle: () => setDark((d) => !d) };
+  return { dark, toggle: () => setDark(value => !value) };
 }

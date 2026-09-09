@@ -10,19 +10,21 @@ export interface Note {
 }
 
 const KEY = "vr-notes";
-const MAX = 200;
+// 不静默删除旧研究记录；配额不足时原记录保留，保存调用方显示错误。
 
 export function loadNotes(): Note[] {
   try {
     const v = JSON.parse(localStorage.getItem(KEY) || "[]");
-    return Array.isArray(v) ? v : [];
+    if (!Array.isArray(v) || v.some(n => !n || typeof n.id !== "string" || typeof n.title !== "string" || typeof n.content !== "string" || typeof n.kind !== "string" || !Number.isFinite(n.ts))) throw new Error("研究记录格式不正确");
+    return v;
   } catch {
-    return [];
+    throw new Error("无法读取本机研究记录，原始数据未修改，请检查浏览器存储权限");
   }
 }
 
 function persist(notes: Note[]) {
-  localStorage.setItem(KEY, JSON.stringify(notes.slice(0, MAX)));
+  try { localStorage.setItem(KEY, JSON.stringify(notes)); }
+  catch { throw new Error("本机存储空间不足或禁止保存，原记录未改动，请先复制本次结果"); }
 }
 
 // 新记录置顶。返回更新后的完整列表。
@@ -43,8 +45,4 @@ export function deleteNote(id: string): Note[] {
   const next = loadNotes().filter((n) => n.id !== id);
   persist(next);
   return next;
-}
-
-export function clearNotes() {
-  localStorage.removeItem(KEY);
 }

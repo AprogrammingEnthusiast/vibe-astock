@@ -30,14 +30,15 @@ def selected_llm() -> dict | None:
     return json.loads(PROFILE.read_text(encoding="utf-8"))
 
 
-def write_profile(value):
-    PROFILE.parent.mkdir(parents=True, exist_ok=True)
-    temp = PROFILE.with_name(uuid.uuid4().hex + ".tmp")
+def write_profile(value, path=None):
+    profile = path if path is not None else PROFILE
+    profile.parent.mkdir(parents=True, exist_ok=True)
+    temp = profile.with_name(uuid.uuid4().hex + ".tmp")
     try:
         with temp.open("x", encoding="utf-8") as f:
             os.chmod(temp, 0o600)
             json.dump(value, f, ensure_ascii=False)
-        temp.replace(PROFILE)
+        temp.replace(profile)
     finally:
         temp.unlink(missing_ok=True)
 
@@ -141,6 +142,39 @@ def install(app):
             return JSONResponse({"detail": "请先在「接入 AI」保存你自己的配置", "error": "请先连接你自己的 AI"}, status_code=400)
         return await call_next(request)
 
+    connection_file = PROFILE.with_name("agent-connection.json")
+
+    @app.get("/api/personal/agent-connection")
+    def get_agent_profile():
+        return {"llm": json.loads(connection_file.read_text(encoding="utf-8")) if connection_file.exists() else None}
+
+    @app.put("/api/personal/agent-connection")
+    async def save_agent_profile(request: Request):
+        from review_agent.api import ModelInput
+        from review_agent.runtime import connection
+        from review_agent.evidence import EvidenceError
+        try:
+            value = (await request.json())["llm"]
+            verified_at = value.get("verifiedAt") if isinstance(value, dict) else None
+            if value is not None:
+                if not isinstance(value, dict) or value.get("provider") not in {"codex-private", "openai", "mimo", "api-compatible"}:
+                    raise ValueError()
+                # Verification timestamps are display metadata, not model input.
+                cfg = ModelInput(**{k: v for k, v in value.items() if k != "verifiedAt"})
+                value = cfg.model_dump(exclude={"apiKey"})
+                value["apiKey"] = cfg.apiKey.get_secret_value()
+                connection(value)
+                if value["provider"] in {"claude", "codebuddy"}:
+                    raise ValueError()
+            if value is not None and isinstance(verified_at, (int, float)) and not isinstance(verified_at, bool):
+                import time
+                if 0 < verified_at <= time.time() * 1000:
+                    value["verifiedAt"] = verified_at
+            write_profile(value, connection_file)
+        except (ValueError, TypeError, KeyError, EvidenceError):
+            raise HTTPException(400, "个人 AI 配置无效，请检查来源、地址及模型") from None
+        return {"ok": True}
+
     @app.get("/api/personal/llm")
     def get_profile():
         return {"llm": selected_llm()}
@@ -167,3 +201,36 @@ def install(app):
         except (ValueError, TypeError, KeyError, RuntimeError) as exc:
             raise HTTPException(400, str(exc))
         return {"ok": True}
+
+
+def prepare_agent(runtime):
+    """Migrate only this worker's own login; original data remains as a backup."""
+    import shutil
+    old = Path.home() / ".codex" / "auth.json"
+    target = runtime.home / "auth.json"
+    if not target.exists() and old.is_file() and not old.is_symlink():
+        with target.open("xb") as output, old.open("rb") as source:
+            os.chmod(target, 0o600)
+            shutil.copyfileobj(source, output)
+
+
+def shared_bundle(anchor, version=""):
+    import re
+    if version and not re.fullmatch(r"[0-9a-f]{64}", version):
+        from review_agent.evidence import EvidenceError
+        raise EvidenceError("共享复盘版本无效")
+    import tempfile
+    from review_agent.evidence import build_bundle, valid_date, EvidenceError
+    valid_date(anchor)
+    try:
+        response = requests.get(GATEWAY + "/internal/reviews/dates", headers=_headers(), timeout=10)
+        response.raise_for_status()
+        dates = sorted((d for d in response.json()["dates"] if isinstance(d, str) and d <= anchor), reverse=True)[:20]
+        with tempfile.TemporaryDirectory(prefix="public-evidence-") as tmp:
+            for day in dates:
+                valid_date(day)
+                payload = shared_review(day, version=version) if day == anchor and version else shared_review(day)
+                (Path(tmp) / (day + ".json")).write_text(json.dumps(payload), encoding="utf-8")
+            return build_bundle(Path(tmp), anchor, shared=False)
+    except (requests.RequestException, RuntimeError, ValueError, KeyError) as exc:
+        raise EvidenceError("公共复盘证据暂时不可用，请稍后重试") from exc

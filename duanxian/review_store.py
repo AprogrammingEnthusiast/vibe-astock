@@ -7,6 +7,8 @@ import json
 import os
 import re
 import uuid
+import threading
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -70,15 +72,60 @@ def _read(path: str) -> dict | None:
         return None
 
 
+_SAVE_MUTEX = threading.RLock()
+
+
+@contextmanager
+def _save_lock():
+    """One owner across API threads and CLI processes, released on crash."""
+    os.makedirs(DIR, exist_ok=True)
+    with _SAVE_MUTEX, open(os.path.join(DIR, ".save.lock"), "a+b") as lock:
+        if os.name == "posix":
+            import fcntl
+            fcntl.flock(lock, fcntl.LOCK_EX)
+        else:
+            import msvcrt
+            if os.fstat(lock.fileno()).st_size == 0:
+                lock.write(b"0")
+                lock.flush()
+            lock.seek(0)
+            msvcrt.locking(lock.fileno(), msvcrt.LK_LOCK, 1)
+        try:
+            yield
+        finally:
+            if os.name == "posix":
+                fcntl.flock(lock, fcntl.LOCK_UN)
+            else:
+                lock.seek(0)
+                msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
+
+
 def save(payload: dict, date: str) -> SaveResult:
+    with _save_lock():
+        return _save_unlocked(payload, date)
+
+
+def _save_unlocked(payload: dict, date: str) -> SaveResult:
     """写 `<date>.json` + `latest.json`。不可用产物**不覆盖**已有的可用产物。"""
     os.makedirs(DIR, exist_ok=True)
     dated = safe_join(DIR, f"{date}.json")
     latest = safe_join(DIR, "latest.json")
 
     if usable(payload):
+        # Validate every existing destination before replacing either file.
+        current = _read(latest)
+        if os.path.exists(latest):
+            current_date = (current.get("target_date") or current.get("trade_date")) if isinstance(current, dict) else None
+            if not isinstance(current_date, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", current_date):
+                raise ValueError("最近复盘索引损坏，请修复后重试；本次未覆盖报告")
+        old = _read(dated)
+        if old is not None:
+            versions = Path(DIR) / "_versions"
+            versions.mkdir(exist_ok=True)
+            _atomic_write(str(versions / f"{date}.{uuid.uuid4().hex}.json"), old)
         _atomic_write(dated, payload)
-        _atomic_write(latest, payload)
+        if not current or (current.get("target_date") or current.get("trade_date") or "") <= date:
+            _atomic_write(latest, payload)
         if os.environ.get("VIBE_WORKER_KEY"):
             from sharing_worker import queue_publication
             queue_publication({**payload, "complete": complete(payload)})
@@ -196,7 +243,7 @@ def serialize(final: dict, date: str, extra_warnings: list[str] | None = None) -
         "review_id": f"daily_{date}",
         "target_date": date,
         "trade_date": date,       # 兼容旧前端字段
-        "data_as_of": now,
+        "data_as_of": date + " 收盘（各项缺口见 warnings）",
         "generated_at": now,
         "warnings": warnings,
         "focus": final.get("focus_struct"),
@@ -204,6 +251,6 @@ def serialize(final: dict, date: str, extra_warnings: list[str] | None = None) -
         "emotion_metrics": final.get("emotion_metrics") or {},
         "market_facts": final.get("market_facts") or {},
         "macro_sector": macro,
-        "reflection": reflection.latest_reflection(),   # 反思闭环：上期命中回看
+        "reflection": reflection.latest_reflection(end=date),   # 反思闭环：上期命中回看
         "analysts": analysts,
     }

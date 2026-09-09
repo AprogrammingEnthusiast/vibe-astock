@@ -43,8 +43,9 @@ def _degrade(label: str, date: str, exc: Exception) -> str:
 
 
 def _asof_note(date: str) -> str:
-    """非当日复盘时，标注资金/板块口径为实时值而非历史 EOD（ #7）"""
-    return "" if is_today(date) else f"\n（⚠️口径提示：资金流/板块数据为当前实时值，非 {date} 历史收盘口径）"
+    """仅在取数前后均通过参考行情日期校验的分支追加。"""
+    return (f"\n（口径提示：取数前后参考行情均对应 {date} 收盘；"
+            "资金流/板块来自当前接口，并非独立历史快照，端点本身的时间戳未单独核实。）")
 
 
 # ============ ① 情绪面 ============
@@ -155,7 +156,8 @@ def render_market_facts(f: dict) -> str:
             f"· 亏钱效应：{le['prev_date']} 涨停的 {le['sample']} 只里，今日跌超 5% 有 "
             f"{le['deep_loss_5_count']} 只（{_pct(le['deep_loss_5_rate'])}）、跌超 7% 有 "
             f"{le['deep_loss_7_count']} 只、跌停 {le['limit_down_count']} 只，最差 {le['worst']:+.2f}%；"
-            f"全市场跌停 {le['market_limit_down']} 家{rec_txt}"
+            + (f"全市场跌停 {le['market_limit_down']} 家" if le.get("market_limit_down") is not None
+             else "本统计模块未获取全市场跌停数") + rec_txt
         )
     else:
         lines.append(f"· 亏钱效应：不可用（{le.get('reason', '未知')}）")
@@ -212,6 +214,14 @@ def render_market_facts(f: dict) -> str:
 
 # ============ ② 资金面 ============
 def get_capital_data(date: str) -> str:
+    from .trade_calendar import live_quotes_are_close_of
+    matched, reason = live_quotes_are_close_of(date)
+    if not matched:
+        try:
+            from .historical_sources import historical_activity
+            return historical_activity(date)
+        except Exception as exc:
+            return _degrade("资金面历史补源", date, exc)
     try:
         ind = dr.fetch_sector_flow("2")  # 行业
         dr.enrich_trend(ind)
@@ -237,6 +247,9 @@ def get_capital_data(date: str) -> str:
                 lines.append(f"  {t['name']} {t['amount']}亿 涨{t['change_pct']}% {t.get('sector') or ''}")
         except Exception as exc:
             lines.append(f"（成交额榜获取失败已跳过：{type(exc).__name__}）")
+        matched, reason = live_quotes_are_close_of(date)
+        if not matched:
+            return _degrade_msg("实时资金与板块", date, "取数期间行情日期已变化，本批未使用：" + reason)
         return "\n".join(lines) + _asof_note(date)
     except Exception as exc:  # noqa: BLE001
         return _degrade("资金面", date, exc)
@@ -244,27 +257,31 @@ def get_capital_data(date: str) -> str:
 
 # ============ 大板块本周 ============
 def get_macro_sector_data(date: str) -> str:
+    from .trade_calendar import live_quotes_are_close_of
+    matched, reason = live_quotes_are_close_of(date)
+    if not matched:
+        try:
+            from .historical_sources import historical_activity
+            return historical_activity(date, _MACRO_GROUPS)
+        except Exception as exc:
+            return _degrade("大板块历史补源", date, exc)
     try:
         concept = dr.fetch_sector_flow("3")  # 概念
         dr.enrich_trend(concept)
-        lines = ["大赛道跟踪（概念板块口径，5 日累计净额作『本周』代理）："]
+        lines = ["大赛道跟踪（概念板块口径，近5交易日不等于本周）："]
         for grp, kws in _MACRO_GROUPS.items():
             ms = [c for c in concept if any(k in c["name"] for k in kws)]
             if not ms:
                 lines.append(f"  {grp}：无匹配概念板块")
                 continue
-            chg = [c["change_pct"] for c in ms if c["change_pct"] is not None]
-            in5 = [c["inflow_5d"] for c in ms if c["inflow_5d"] is not None]
-            ms_named = sorted(
-                [c for c in ms if c.get("inflow_5d") is not None],
-                key=lambda c: c["inflow_5d"], reverse=True,
-            )[:3]
-            names = "、".join(c["name"] for c in ms_named) or "—"
-            avgchg = sum(chg) / len(chg) if chg else None
-            sum5 = sum(in5) if in5 else None
-            avgchg_s = f"{avgchg:+.1f}%" if avgchg is not None else "—"
-            sum5_s = f"{sum5:+.0f}亿" if sum5 is not None else "—"
-            lines.append(f"  {grp}：{len(ms)}个概念 今日均涨{avgchg_s} 5日累计净{sum5_s} 代表[{names}]")
+            lines.append(f"  {grp}（概念成分有重叠，逐项看，不合计）：")
+            for c in sorted(ms, key=lambda x: x.get("inflow_5d") or 0, reverse=True):
+                chg = f"{c['change_pct']:+.2f}%" if c.get('change_pct') is not None else '未覆盖'
+                flow = f"{c['inflow_5d']:+.2f}亿" if c.get('inflow_5d') is not None else '未覆盖'
+                lines.append(f"    {c['name']}：当日涨幅{chg}，近5交易日净额{flow}")
+        matched, reason = live_quotes_are_close_of(date)
+        if not matched:
+            return _degrade_msg("实时资金与板块", date, "取数期间行情日期已变化，本批未使用：" + reason)
         return "\n".join(lines) + _asof_note(date)
     except Exception as exc:  # noqa: BLE001
         return _degrade("大板块本周", date, exc)
@@ -285,7 +302,7 @@ def get_theme_reasons(date: str) -> str:
                 if t:
                     tags[t] += 1
         hot = tags.most_common(12)
-        return f"{date} 涨停题材串热度 TOP：" + "、".join(f"{t}×{c}" for t, c in hot)
+        return f"{date} 涨停题材串热度 TOP：" + "、".join(f"{t}×{c}" for t, c in hot) + (f"\n{err}" if err else "\n来源：问财目标日涨停原因。")
     except Exception as exc:  # noqa: BLE001
         return _degrade("题材涨停原因", date, exc)
 
@@ -330,18 +347,18 @@ def get_leader_data(date: str) -> str:
         if not top:
             return f"[⚠️ {date} 无有效连板数据（可能非交易日），龙头跟踪不可用]"
 
-        lines = [f"连板梯队（{date}）："]
+        lines = [f"连板梯队（{date}，共 {len(ladder)} 只；以下仅展示前 {min(8, len(top))} 只）："]
         for x in top[:8]:
             lines.append(f"  {x['name']}({x['consec_boards']}板·{x.get('sector', '')})")
 
-        # 载入近 5 日历史快照做龙头演化对比
+        # 载入最近 5 份已有快照，归档日期不一定连续。
         try:
             files = sorted(f for f in os.listdir(_LEADER_DIR) if f.endswith(".json") and f[:8] < d)
         except FileNotFoundError:
             files = []
         hist = files[-5:]
         if hist:
-            lines.append("近 5 日龙头谱系（每日最高板龙头，看谁在接力/退潮）：")
+            lines.append("最近 5 份已有历史归档（日期可能不连续，不代表最近五个交易日）：")
             for hf in hist:
                 try:
                     with open(os.path.join(_LEADER_DIR, hf), encoding="utf-8") as fh:
@@ -382,12 +399,12 @@ def is_limit_up(row: dict) -> "Optional[bool]":
 def fetch_prev_pool(date: str) -> "Optional[list[dict]]":
     """取「前一交易日涨停股在 date 当天的表现」，已定稿的日子落盘缓存。"""
     from . import trade_calendar
-    from .util import atomic_write_json
+    from .cache_policy import fresh as cache_fresh, write as write_cache
 
     is_past = trade_calendar.is_settled(date)
     os.makedirs(_PREV_POOL_DIR, exist_ok=True)
     path = os.path.join(_PREV_POOL_DIR, f"{date}.json")
-    if is_past and os.path.isfile(path):
+    if is_past and os.path.isfile(path) and cache_fresh(path, date):
         try:
             with open(path, encoding="utf-8") as fh:
                 return json.load(fh)
@@ -421,5 +438,5 @@ def fetch_prev_pool(date: str) -> "Optional[list[dict]]":
     if not rows:
         return None
     if is_past:
-        atomic_write_json(path, rows)
+        write_cache(path, rows)
     return rows

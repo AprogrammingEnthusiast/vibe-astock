@@ -86,7 +86,7 @@ export function PromotionCard({ pr }: { pr: Promotion }) {
   return (
     <Card
       icon={TrendingUp} title="晋级率"
-      hint="昨日各档连板今天仍涨停的比例。1进2 最敏感：走低=退潮，回升=修复"
+      hint="昨日各档连板今天仍涨停的比例。1进2反映接力变化，需结合封板质量、样本规模与亏钱效应判断情绪"
       caliber={"分母 = 昨日收盘时处在该板位的全部个股；分子 = 其中今日收盘仍涨停的。\n" +
         "板位按**昨日收盘**的连板数算，断板后反包不计入原板位。\n" +
         "一字涨停算正常晋级（只看结果不看能否买到）。\n" +
@@ -122,7 +122,7 @@ export function ConsecPremiumCard({ cp }: { cp: ConsecPremium }) {
   return (
     <Card
       icon={Layers} title="连板溢价"
-      hint="昨日 2 板以上个股今天的表现 = 高标承接度"
+      hint="昨日 2 板以上个股今天的表现；仅描述该样本的涨跌，不能单凭溢价判断承接"
       caliber={"样本 = 昨日收盘时 2 板及以上的个股，口径同赚钱效应（收盘对收盘）。\n" +
         "它和赚钱效应的差值就是「高位比整体更抗跌还是更惨」。\n" +
         "翻红率同上：今天收涨的占比，平盘不算。"}
@@ -183,7 +183,7 @@ function ladderNote(lg: LadderGap): string {
   const gaps = safeArray<number>(lg.gaps);
   if (!gaps.length) return plain(lg.note);
   const hi = lg.highest != null ? `（${lg.highest}板）` : "";
-  return `板位缺档 ${gaps.map((g) => `${g}板`).join("、")} → 最高标${hi}下方断层，断板后没有下一梯队承接`;
+  return `板位缺档 ${gaps.map((g) => `${g}板`).join("、")} → 最高标${hi}下方断层，是否有同题材承接需另查，板位缺档本身不能判定`;
 }
 
 export function CycleCard({ cy }: { cy: EmotionCycle }) {

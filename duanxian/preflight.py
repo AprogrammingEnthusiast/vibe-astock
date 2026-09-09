@@ -59,7 +59,7 @@ def _looks_degraded(text: str) -> bool:
     return not t or is_degraded_report(t)
 
 
-def check(date: str) -> dict:
+def check(date: str, *, data_source=data) -> dict:
     """体检 `date` 这一场的输入。
 
     返回 `{"ok": bool, "missing_core": [...], "missing_optional": [...], "warnings": [...]}`。
@@ -80,7 +80,7 @@ def check(date: str) -> dict:
 
     for label, fname, is_core in _CHECKS:
         try:
-            text = _text_of(getattr(data, fname)(date))
+            text = _text_of(getattr(data_source, fname)(date))
         except Exception as exc:  # noqa: BLE001  体检本身别把复盘搞崩
             text = f"[⚠️ {label} 体检取数异常：{type(exc).__name__}: {exc}]"
         if _looks_degraded(text):

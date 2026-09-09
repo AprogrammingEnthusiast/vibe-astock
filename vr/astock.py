@@ -16,6 +16,7 @@ import os
 import random
 import re
 import time
+import threading
 import urllib.request
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -66,6 +67,7 @@ def _parse_gtimg(data: str) -> dict[str, dict]:
 
         result[code] = {
             "name": vals[1],
+            "quote_time": vals[30] if len(vals) > 30 else None,
             "price": num(3),
             "last_close": num(4),
             "open": num(5),
@@ -336,26 +338,35 @@ def valuation_percentile(code: str, period: str = "近五年") -> dict:
         frac = idx - lo
         return vals[lo] * (1 - frac) + vals[lo + 1] * frac
 
-    metrics = {}
+    import pandas as pd
+    metrics, gaps = {}, []
     for key, ind in (("pe_ttm", "市盈率(TTM)"), ("pb", "市净率")):
         try:
             df = ak.stock_zh_valuation_baidu(symbol=code, indicator=ind, period=period)
-            raw = df.iloc[:, 1].dropna().astype(float).tolist()
+            df = df.copy()
+            daycol, valuecol = df.columns[:2]
+            df[daycol] = pd.to_datetime(df[daycol], errors="coerce")
+            df[valuecol] = pd.to_numeric(df[valuecol], errors="coerce")
+            valid = df[daycol].notna() & df[valuecol].map(math.isfinite)
+            if not valid.all(): gaps.append(f"{ind}剔除了无效日期或数值，分位基于剩余样本")
+            df = df[valid].sort_values(daycol)
+            raw = df.iloc[:, 1].astype(float).tolist()
             if not raw:
+                gaps.append(f"{ind}没有取得有效历史样本")
                 continue
             cur = float(raw[-1])
             s = sorted(raw)
             below = sum(1 for x in s if x < cur)
             metrics[key] = {
-                "current": round(cur, 2),
+                "current": round(cur, 2), "as_of": str(df.iloc[-1, 0])[:10],
                 "percentile": round(below / max(len(s) - 1, 1) * 100, 1),
                 "min": round(s[0], 2), "max": round(s[-1], 2),
                 "p20": round(_q(s, 0.2), 2), "p50": round(_q(s, 0.5), 2), "p80": round(_q(s, 0.8), 2),
                 "n": len(s),
             }
         except Exception:
-            continue
-    return {"period": "近5年", "metrics": metrics}
+            gaps.append(f"{ind}历史取数失败，未取得不等于没有历史")
+    return {"period": "近5年", "metrics": metrics, "gaps": gaps}
 
 
 def full_valuation(code: str) -> dict:
@@ -368,6 +379,7 @@ def full_valuation(code: str) -> dict:
     price = q["price"]
     out = {
         "name": q["name"], "code": code, "price": price,
+        "quote_time": q.get("quote_time"),
         "mcap_yi": q["mcap_yi"], "pe_ttm": q["pe_ttm"], "pb": q["pb"],
         "eps_26e": None, "eps_27e": None, "pe_26e": None,
         "cagr_pct": None, "peg": None, "digest_years": None, "analyst_count": 0,
@@ -464,30 +476,33 @@ def _em_session(direct: bool):
     return s
 
 
-def em_get(url: str, params: dict | None = None, headers: dict | None = None, timeout: int = 15):
-    """东财统一请求入口：串行限流 + **直连优先、失败降级系统代理**（避免科学上网代理挂掉国内站）。
+_EM_REQUEST_LOCK = threading.Lock()
 
-    第一次请求探测：先直连（短超时、不重试），成功即固定走直连；失败则降级走系统代理并固定。
-    探测结果整个进程复用，避免每次重试。`VR_DATA_PROXY=1` 可跳过探测、强制走代理。
-    """
-    wait = _EM_MIN_INTERVAL - (time.time() - _em_last_call[0])
-    if wait > 0:
-        time.sleep(wait + random.uniform(0.1, 0.5))
-    try:
+def em_get(url: str, params: dict | None = None, headers: dict | None = None, timeout: int = 15):
+    """东财请求按启动时刻限流；慢请求不阻塞其他页面的网络往返。"""
+    with _EM_REQUEST_LOCK:
+        now = time.monotonic()
+        start = max(now, _em_last_call[0])
+        _em_last_call[0] = start + _EM_MIN_INTERVAL + random.uniform(0.1, 0.5)
+        # Session creation and routing state are brief, local operations.
         mode = _em_mode[0]
-        if mode != "auto":
-            return _em_session(mode == "direct").get(url, params=params, headers=headers, timeout=timeout)
-        # auto：先直连，成功固定 direct；直连失败再走系统代理、成功固定 proxy。
-        try:
-            r = _em_session(True).get(url, params=params, headers=headers, timeout=min(timeout, 8))
-            _em_mode[0] = "direct"
-            return r
-        except Exception:
-            r = _em_session(False).get(url, params=params, headers=headers, timeout=timeout)
-            _em_mode[0] = "proxy"
-            return r
-    finally:
-        _em_last_call[0] = time.time()
+        direct = _em_session(True) if mode != "proxy" else None
+        proxy = _em_session(False) if mode != "direct" else None
+    wait = start - time.monotonic()
+    if wait > 0:
+        time.sleep(wait)
+    if mode != "auto":
+        return (direct if mode == "direct" else proxy).get(url, params=params, headers=headers, timeout=timeout)
+    try:
+        result = direct.get(url, params=params, headers=headers, timeout=min(timeout, 8))
+        selected = "direct"
+    except Exception:
+        result = proxy.get(url, params=params, headers=headers, timeout=timeout)
+        selected = "proxy"
+    with _EM_REQUEST_LOCK:
+        if _em_mode[0] == "auto":
+            _em_mode[0] = selected
+    return result
 
 
 # ---------------------------------------------------------------------------

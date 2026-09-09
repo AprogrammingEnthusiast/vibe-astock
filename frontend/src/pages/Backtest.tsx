@@ -9,15 +9,14 @@ import {
 } from "@/lib/agent";
 
 const DISCLAIMER =
-  "回测是对「一条规则」在历史上的统计，不是对任何个股的推荐，也不产出前瞻标的。历史统计不代表未来表现。";
+  "本页统计历史涨停样本的后续表现，不代表可执行策略的收益，也不产出前瞻标的。";
 
 // ⚠️ 这段警告不能删也不能弱化。样本是"事后知道封住了"的名单 ——
 // 实测某日 141 只票冲过板、只有 116 只封住，18% 的失败样本完全不在统计里。
 // 把这里的数字当成"打板这套打法的期望"是会亏钱的误读。
 const CAVEAT =
-  "这是「市场现象统计」，不是策略回测。样本 = 昨日收盘留在涨停池里的票（事后名单）——"
-  + "冲板没封住的、排队没成交的、一字板买不进的都不在内（实测某日 141 只冲板仅 116 只封住，"
-  + "18% 失败样本没算）。真实打板的期望必然低于这里的数字。";
+  "样本是收盘仍在涨停池里的事后名单，包含一字板等未必能成交的股票，未排除排队买不到的情况。"
+  + "冲板失败且未回封的股票不在样本内。没有成交模拟，不能推导真实交易收益或打法期望。";
 
 const EMPTY: BacktestStats = {
   sample: 0, win_rate: null, avg: null, median: null, best: null, worst: null, limit_up_rate: null,
@@ -61,10 +60,11 @@ function ArchiveNote() {
       try { setSum(await agentFetch<ArchiveSummary>("/api/archive/summary")); } catch { /* 归档只是附加信息，读不到就不显示 */ }
     })();
   }, []);
-  if (!sum?.available) return null;
+  if (!sum) return null;
   const drifts = Object.values(safeRecord<ArchiveDrift>(sum.drift)).filter((d) => d.changed);
   return (
     <div className="rounded-xl border border-border bg-muted/20 px-4 py-2.5 text-[12px] leading-relaxed text-muted-foreground">
+      {sum.coverage_note && <p role="status" className="text-warning">{sum.coverage_note}</p>}
       <b className="text-foreground">原始数据已归档 {sum.days} 天</b>
       （{sum.date_from} ~ {sum.date_to}，{sum.size_mb} MB，
       {Object.keys(safeRecord(sum.datasets)).length} 类数据）。
@@ -77,7 +77,7 @@ function ArchiveNote() {
           ⚠ {drifts.length} 类数据的字段变过（{open ? "收起" : "看是哪些"}）
         </button>
       ) : (
-        <span className="ml-1 text-success">字段清单稳定。</span>
+        <span className="ml-1 text-success">仅在已有归档中未检出字段变化，不证明未覆盖日期稳定。</span>
       )}
       {open && (
         <div className="mt-2 space-y-1.5 border-t border-border pt-2">
@@ -108,7 +108,7 @@ function DriftNote() {
       try { setRep(await agentFetch<DriftReport>("/api/drift")); } catch { /* 附加信息 */ }
     })();
   }, []);
-  if (!rep?.available) return null;
+  if (!rep) return null;
   const st = rep.structure;
   const shifted = safeArray<DriftMetric>(st?.metrics).filter((m) => m.shifted);
   const fieldChanged = safeArray<string>(rep.field_changed);
@@ -118,7 +118,8 @@ function DriftNote() {
       quiet ? "border-border bg-muted/20 text-muted-foreground"
             : "border-warning/40 bg-warning/10 text-warning")}>
       <b className={quiet ? "text-foreground" : ""}>结构漂移检测</b>
-      {" · "}{rep.summary}
+      {" · "}归档截至 {rep.last_archived_session || "未覆盖"} · {rep.summary}
+      {rep.coverage_note && <p role="status" className="text-warning">{rep.coverage_note}</p>}
       <button onClick={() => setOpen((v) => !v)}
         className="ml-1 cursor-pointer underline decoration-dotted transition-opacity hover:opacity-80">
         {open ? "收起" : "展开"}
@@ -229,7 +230,7 @@ export function Backtest() {
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
           <h1 className="flex items-center gap-2 text-2xl font-bold">
-            <TrendingDown className="h-6 w-6 text-primary" /> 策略回测
+            <TrendingDown className="h-6 w-6 text-primary" /> 历史统计
           </h1>
           <p className="mt-0.5 text-sm text-muted-foreground">
             昨日涨停样本在次日的历史表现 · 不是策略回测
@@ -374,7 +375,7 @@ export function Backtest() {
 
                   <div className="mt-3 space-y-1 border-t border-dashed border-border pt-2">
                     <div className="mb-1 text-[11px] font-semibold text-primary">分情绪环境</div>
-                    {["情绪强", "情绪中", "情绪弱"].map((k) => (
+                    {["情绪强", "情绪中", "情绪弱", "环境未覆盖"].map((k) => (
                       <RegimeRow key={k} name={k} s={s.by_regime?.[k] ?? EMPTY} />
                     ))}
                   </div>

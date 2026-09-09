@@ -17,7 +17,7 @@ from __future__ import annotations
 import urllib.request
 from typing import Optional
 
-_TENCENT = "http://qt.gtimg.cn/q="
+_TENCENT = "https://qt.gtimg.cn/q="
 _F_NAME, _F_PRICE, _F_TIME, _F_PCT = 1, 3, 30, 32
 
 # 腾讯代码 → 展示名。名字自己给：腾讯返回的 "Meta Platforms, Inc." 太长，

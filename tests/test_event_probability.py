@@ -95,7 +95,7 @@ def test_events_routes_in_main_app(monkeypatch):
     payload = {"items": [], "updated": "", "partial": False, "warnings": [], "how_to_read": []}
     monkeypatch.setattr(p, "get_probability", lambda force=False: calls.append(force) or payload)
     monkeypatch.setattr(server, "_VR_API_KEY", "")
-    client = TestClient(server.app)
+    client = TestClient(server.app, base_url="http://localhost")
     assert client.get("/api/radar/events").json() == {"data": payload}
     assert client.post("/api/radar/events/refresh").json() == {"data": payload}
     assert calls == [False, True]

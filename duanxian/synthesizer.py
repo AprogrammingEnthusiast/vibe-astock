@@ -9,14 +9,14 @@ from .helpers import collect_reports
 from .prompts import PACK
 from .structured import invoke_json_schema
 
-def create_review_judge(llm):
+def create_review_judge(llm, *, pack=PACK, strict=False):
     def node(state) -> dict:
         reports = collect_reports(state)
         sources = "今日各面复盘报告"
         past = (state.get("past_context") or "").strip()
         past_block = (
             f"\n\n{past}\n（务必结合上面的历史命中/踏空经验校准今天的判断——"
-            f"上次踏空的别再保守、上次追高被套的别再冒进。）\n"
+            f"历史观察只用于检验假设，不推导交易动作。）\n"
             if past else ""
         )
         base_prompt = f"""你是 A 股短线『复盘裁判』。综合下列{sources}，产出盘面研判。
@@ -31,15 +31,16 @@ def create_review_judge(llm):
 
 
 要求（给明确的判断，别打太极）：
-{PACK.judge_requirements}"""
+{pack.judge_requirements}"""
 
         md, obj = invoke_json_schema(
             llm,
             base_prompt,
-            PACK.focus_model,
-            PACK.render_focus,
+            pack.focus_model,
+            pack.render_focus,
             "复盘裁判",
-            PACK.focus_skeleton,
+            pack.focus_skeleton,
+            strict=strict,
         )
 
 
@@ -48,7 +49,7 @@ def create_review_judge(llm):
         if struct is not None and not struct.get("verification_items"):
             from .verification import extract_items
 
-            items = extract_items(llm, md, struct.get("emotion_phase", ""))
+            items = extract_items(llm, md, struct.get("emotion_phase", ""), strict=strict)
             if items:
                 struct["verification_items"] = items
 

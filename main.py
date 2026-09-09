@@ -1,4 +1,8 @@
-"""短线每日复盘 —— 命令行入口。
+"""短线每日复盘 —— 旧命令行兼容入口。
+
+网页主流程为 review_agent/daily.py，证据校验和取消恢复在该主流程维护。
+本入口保留原有脚本使用方式；共享取数、归档与口径修复仍同步适用，
+不在此扩展第二套网页任务状态机，也不将旧 CLI 成功算作网页验收。
 
 用法：
     .venv/bin/python main.py [YYYY-MM-DD]
@@ -28,7 +32,7 @@ def initial_state(trade_date: str) -> dict:
         "emotion_metrics": {}, "market_facts": {},  # 派生情绪指标（情绪面分析师写入）
         "tomorrow_focus": "",
         "focus_struct": None,
-        "past_context": reflection.get_past_context(),  # 反思闭环：注入历史命中回看
+        "past_context": reflection.get_past_context(end=trade_date),  # 反思闭环：注入历史命中回看
     }
 
 
@@ -89,6 +93,8 @@ def main() -> None:
         print(f"\n⚠️ 未写入：{res.reason}")
 
     print(f"\n[耗时 {time.time()-t0:.0f}s]")
+    if not res.written:
+        sys.exit(2)
 
 
 if __name__ == "__main__":

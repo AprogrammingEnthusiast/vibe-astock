@@ -23,7 +23,9 @@
 from __future__ import annotations
 
 import json
+import math
 import os
+from datetime import date as Date
 from statistics import mean
 from typing import Optional
 
@@ -37,7 +39,7 @@ _RULES_SCHEMA = 1
 # 不同资金量、不同打法的合理阈值差得远，这里只给一套能跑起来的初值。
 DEFAULT_RULES = {
     "max_loss_per_trade_pct": 5.0,     # 单笔最大亏损（%）
-    "max_loss_per_day_pct": 8.0,       # 单日最大亏损（占当日投入）
+    "max_loss_per_day_pct": 8.0,       # 单日最大亏损（占用户填写的账户规模）
     "max_positions": 3,                # 最多同时持仓数
     "max_trades_per_day": 5,           # 单日最多开仓笔数（防手痒）
     "pause_after_losses": 3,           # 连亏几笔后应当停手
@@ -55,16 +57,27 @@ _RULE_LABELS = {
 
 
 def load_rules() -> dict:
-    """读风险宪法。没设过就给默认值（并标明是默认值，不是用户写的）。"""
-    if os.path.isfile(_RULES_PATH):
-        try:
-            with open(_RULES_PATH, encoding="utf-8") as fh:
-                env = json.load(fh)
-            if env.get("schema") == _RULES_SCHEMA and isinstance(env.get("rules"), dict):
-                return {**DEFAULT_RULES, **env["rules"], "_is_default": False}
-        except Exception:  # noqa: BLE001  坏了当没设过，用户可以重设
-            pass
-    return {**DEFAULT_RULES, "_is_default": True}
+    """缺文件才用默认值；损坏配置必须显式报错，不能换回宽松阈值。"""
+    if not os.path.exists(_RULES_PATH):
+        return {**DEFAULT_RULES, "_is_default": True}
+    try:
+        with open(_RULES_PATH, encoding="utf-8") as fh:
+            env = json.load(fh)
+        if not isinstance(env, dict) or env.get("schema") != _RULES_SCHEMA or not isinstance(env.get("rules"), dict):
+            raise ValueError()
+        saved = env["rules"]
+        for k, v in saved.items():
+            if k not in DEFAULT_RULES or isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
+                raise ValueError()
+            if v < 0 or (v == 0 and k != "max_unplanned_ratio") or (k.endswith("_ratio") and v > 1):
+                raise ValueError()
+            if not k.endswith(("_pct", "_ratio")) and not float(v).is_integer():
+                raise ValueError()
+        if not saved:
+            raise ValueError()
+        return {**DEFAULT_RULES, **saved, "_is_default": False}
+    except (OSError, ValueError, TypeError) as exc:
+        raise ValueError("风险规则文件损坏或无法读取；原文件已保留，请重新填写完整规则") from exc
 
 
 def save_rules(rules: dict) -> dict:
@@ -77,11 +90,18 @@ def save_rules(rules: dict) -> dict:
             f = float(v)
         except (TypeError, ValueError) as exc:
             raise ValueError(f"{_RULE_LABELS.get(k, k)} 必须是数字") from exc
-        if f != f or f <= 0:
+        if isinstance(v, bool) or not math.isfinite(f) or f < 0 or (f == 0 and k != "max_unplanned_ratio"):
             raise ValueError(f"{_RULE_LABELS.get(k, k)} 必须是正数")
+        if k.endswith("_ratio") and f > 1:
+            raise ValueError("计划外交易占比须在0到1之间")
+        if not k.endswith(("_pct", "_ratio")) and not f.is_integer():
+            raise ValueError(f"{_RULE_LABELS[k]} 必须是整数")
         clean[k] = f if k.endswith(("_pct", "_ratio")) else int(f)
     if not clean:
         raise ValueError("没有可保存的规则")
+    # 接受局部编辑，但不悄悄重置其余用户阈值。完整输入可显式修复坏配置。
+    if set(clean) != set(DEFAULT_RULES):
+        clean = {**{k: v for k, v in load_rules().items() if k in DEFAULT_RULES}, **clean}
     os.makedirs(_DIR, exist_ok=True)
     if not atomic_write_json(_RULES_PATH, {"schema": _RULES_SCHEMA, "rules": clean}):
         raise RuntimeError("风险宪法写入失败")
@@ -101,7 +121,7 @@ def equity_curve(trades: list[dict]) -> dict:
         return {"available": False, "reason": "还没有已平仓且填了成交明细的交易"}
 
     # 按最后卖出日排序 —— 盈亏是在平仓那天落地的
-    closed.sort(key=lambda t: (t["settled"].get("last_sell") or t["date"], t["created_at"]))
+    closed.sort(key=lambda t: (t["settled"].get("last_sell") or t["date"], (t.get("created_at") or "")))
     points, cum, peak, peak_date = [], 0.0, 0.0, None
     max_dd, max_dd_from, dd_start = 0.0, None, None
     longest_underwater, cur_underwater = 0, 0
@@ -135,6 +155,7 @@ def equity_curve(trades: list[dict]) -> dict:
     return {
         "available": True,
         "points": points,
+        "date_note": "缺平仓日期的记录按录入日排列" if any(not t["settled"].get("last_sell") for t in closed) else "按平仓日排列",
         "trades": len(closed),
         "net_pnl": round(cum, 2),
         "peak": round(peak, 2),
@@ -231,7 +252,7 @@ def violations(trades: list[dict], rules: Optional[dict] = None) -> dict:
 
     by_day: dict[str, list[dict]] = {}
     for t in trades:
-        by_day.setdefault(t.get("date") or "", []).append(t)
+        by_day.setdefault((t.get("settled") or {}).get("first_buy") or t.get("date") or "", []).append(t)
 
     # ⚠️ 每条规则都要报「查了没有」。只给一个总违规数的话，
     #    规则明明配了却从没被检查过，界面上会显示成"0 次违反"——
@@ -241,12 +262,13 @@ def violations(trades: list[dict], rules: Optional[dict] = None) -> dict:
     # ---- 单日最大亏损：按**平仓日**汇总净盈亏 ----
     # 需要金额与账户规模才能算占比；缺任一样就如实标 unavailable，绝不按 0 处理。
     equity_base = None
+    equity_error = None
     try:
         from .at_risk import load_equity_base
 
         equity_base = load_equity_base()
-    except Exception:  # noqa: BLE001
-        equity_base = None
+    except (OSError, ValueError) as exc:
+        equity_error = str(exc)
 
     found = []
     day_pnl: dict[str, float] = {}
@@ -262,7 +284,9 @@ def violations(trades: list[dict], rules: Optional[dict] = None) -> dict:
         pnl, sell_day = st.get("realized_pnl"), st.get("last_sell")
         if pnl is not None and sell_day:   # 老记录没有按日拆分，退回整笔挂平仓日
             day_pnl[sell_day] = day_pnl.get(sell_day, 0.0) + float(pnl)
-    if not day_pnl:
+    if equity_error:
+        checked["max_loss_per_day_pct"] = "unavailable：" + equity_error
+    elif not day_pnl:
         checked["max_loss_per_day_pct"] = "unavailable：没有带成交明细的已平仓交易，算不出单日盈亏"
     elif not equity_base:
         checked["max_loss_per_day_pct"] = "unavailable：没填账户规模，单日亏损占比没有分母"
@@ -293,15 +317,29 @@ def violations(trades: list[dict], rules: Optional[dict] = None) -> dict:
     # ⚠️ 用 all 不是 any：只要**有一条**记录没有成交明细，这一条的结论就是按日期近似出来的，
     #    必须如实标注。写成 any 的话，一条有明细就显示成 "checked"，把近似掩盖掉了。
     approx = 0
+    undated_closed = 0
+    invalid_spans = 0
     for t in trades:
         st = t.get("settled") or {}
         start = st.get("first_buy") or t.get("date")
-        if not start:
+        if (not st.get("has_fills") and t.get("pnl_pct") is not None) or (st.get("closed") and not st.get("last_sell")):
+            undated_closed += 1
+            continue
+        end = st.get("last_sell") if st.get("closed") else None
+        code = str(t.get("code") or "")
+        try:
+            if not code.isascii() or not code.isdigit() or len(code) > 6:
+                raise ValueError("无效代码")
+            if Date.fromisoformat(start).isoformat() != start:
+                raise ValueError("无效建仓日")
+            if end is not None and (Date.fromisoformat(end).isoformat() != end or end < start):
+                raise ValueError("无效平仓日")
+        except (TypeError, ValueError):
+            invalid_spans += 1
             continue
         if not st.get("has_fills"):
             approx += 1
-        end = st.get("last_sell") if st.get("closed") else None
-        spans.append((str(t.get("code") or "").zfill(6), start, end))
+        spans.append((code.zfill(6), start, end))
     if not spans:
         checked["max_positions"] = "unavailable：没有可用的建仓/平仓日期"
     else:
@@ -316,6 +354,13 @@ def violations(trades: list[dict], rules: Optional[dict] = None) -> dict:
                               "label": _RULE_LABELS["max_positions"],
                               "limit": cap_n, "actual": len(holding),
                               "detail": f"{day} 同时持有 {len(holding)} 只"})
+
+    if undated_closed:
+        checked["max_positions"] = "unavailable：有手填盈亏但缺成交日期或缺平仓日期的记录，未能完整核对历史持仓上限；已确认的超限仍展示，结果可能漏计"
+    if invalid_spans:
+        reason = "有代码或建仓/平仓日期异常的记录，未纳入持仓区间"
+        checked["max_positions"] = (checked["max_positions"] + "；另有" + reason[1:]) if undated_closed else \
+            "unavailable：" + reason + "；已确认的超限仍展示，结果可能漏计"
 
     for day, rows in sorted(by_day.items()):
         # 单日开仓笔数
@@ -424,6 +469,7 @@ def _window_stats(closed: list[dict]) -> dict:
         # 执行率也按窗口看 —— 纪律是会滑坡的，终身执行率看不出最近在放飞
         "execution_rate": (round(len(planned) / (len(planned) + len(unplanned)), 3)
                            if (planned or unplanned) else None),
+        "date_note": "缺平仓日期的记录按录入日排列" if any(not t["settled"].get("last_sell") for t in closed) else "按平仓日排列",
         "date_from": (closed[0]["settled"].get("last_sell") or closed[0]["date"]),
         "date_to": (closed[-1]["settled"].get("last_sell") or closed[-1]["date"]),
     }
@@ -439,7 +485,7 @@ def rolling(trades: list[dict]) -> dict:
               if (t.get("settled") or {}).get("realized_pnl") is not None]
     if not closed:
         return {"available": False, "reason": "还没有已平仓且填了成交明细的交易"}
-    closed.sort(key=lambda t: (t["settled"].get("last_sell") or t["date"], t["created_at"]))
+    closed.sort(key=lambda t: (t["settled"].get("last_sell") or t["date"], (t.get("created_at") or "")))
 
     out = {"available": True, "windows": {}, "lifetime": _window_stats(closed)}
     for n in _WINDOWS:
@@ -468,7 +514,7 @@ def report() -> dict:
     """风控总报告：权益曲线 + 纪律归因 + 规则违反。全部基于用户自己的数据。"""
     from .journal import list_trades
 
-    trades = list_trades(limit=5000)["trades"]
+    trades = list_trades(limit=None)["trades"]
     rules = load_rules()
     return {
         "equity": equity_curve(trades),
@@ -500,7 +546,7 @@ def render(rep: dict) -> str:
     lines.append(
         f"· 权益：净盈亏 {eq['net_pnl']}，距高点回撤 {eq['current_drawdown']}"
         f"（历史最大 {eq['max_drawdown']}），已 {eq['trades_since_peak']} 笔未创新高；"
-        f"胜率 {eq['win_rate']:.0%}"
+        + (f"胜率 {eq['win_rate']:.0%}" if eq.get("win_rate") is not None else "胜率 —（全部持平）")
         + (f"，盈亏比 {eq['payoff_ratio']}" if eq.get("payoff_ratio") else "")
         + (f"，Profit Factor {eq['profit_factor']}" if eq.get("profit_factor") else "")
     )

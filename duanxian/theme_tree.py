@@ -40,6 +40,7 @@
 """
 
 from __future__ import annotations
+from .cache_policy import fresh as cache_fresh, write as write_cache
 
 import json
 import os
@@ -66,12 +67,13 @@ def _is_generic(tag: str) -> bool:
 def reasons_of(date: str) -> tuple[dict[str, str], Optional[str]]:
     """某日的 代码→题材串。先读缓存，没有就按那一天现查并落盘。"""
     path = os.path.join(_CACHE_DIR, f"{date}.json")
-    if os.path.isfile(path):
+    if os.path.isfile(path) and cache_fresh(path, date):
         try:
             with open(path, encoding="utf-8") as fh:
                 env = json.load(fh)
-            if env.get("schema") == _SCHEMA and env.get("date") == date:
-                return env.get("reasons") or {}, None
+            if (env.get("schema") == _SCHEMA and env.get("date") == date
+                    and (not env.get("source_note") or str(env["source_note"]).startswith("来源："))):
+                return env.get("reasons") or {}, env.get("source_note")
         except Exception:  # noqa: BLE001
             pass
 
@@ -84,9 +86,9 @@ def reasons_of(date: str) -> tuple[dict[str, str], Optional[str]]:
     if not reasons:
         return {}, err or "问财未返回题材串"
     # 只有定稿的日子才落盘（同 emotion_metrics 的判据）
-    if trade_calendar.is_settled(date):
-        atomic_write_json(path, {"schema": _SCHEMA, "date": date, "reasons": reasons})
-    return reasons, None
+    if trade_calendar.is_settled(date) and (not err or err.startswith("来源：")):
+        write_cache(path, {"schema": _SCHEMA, "date": date, "reasons": reasons, "source_note": err})
+    return reasons, err
 
 
 def capture(date: Optional[str] = None) -> dict:
@@ -95,7 +97,8 @@ def capture(date: Optional[str] = None) -> dict:
     if not date:
         return {"ok": False, "reason": "取不到最近已收盘交易日（可能非交易日或未收盘）"}
     reasons, err = reasons_of(date)
-    return {"ok": bool(reasons), "date": date, "count": len(reasons), "reason": err}
+    reasons = {str(k).zfill(6): v for k, v in reasons.items()}
+    return {"ok": bool(reasons) and (not err or err.startswith("来源：")), "date": date, "count": len(reasons), "reason": err}
 
 
 def _tags(reason: str) -> list[str]:
@@ -116,6 +119,7 @@ def build(date: str, prev: Optional[str] = None, top: int = 10) -> dict:
     if p is None:
         return {"available": False, "reason": f"{date} 涨停池取数失败"}
     reasons, err = reasons_of(date)
+    reasons = {str(k).zfill(6): v for k, v in reasons.items()}
     if not reasons:
         return {"available": False,
                 "reason": f"题材串不可用（{err}）。⚠️ 不用行业分类顶替 —— 行业≠题材。"}
@@ -130,10 +134,13 @@ def build(date: str, prev: Optional[str] = None, top: int = 10) -> dict:
 
     # 昨日各票的题材与板位 —— 用来算"这个题材昨天的强势股今天怎么样"
     prev_reasons, _prev_err = reasons_of(prev) if prev else ({}, "无前一交易日")
-    has_prev_reasons = bool(prev_reasons)
+    prev_reasons = {str(k).zfill(6): v for k, v in prev_reasons.items()}
     pp = mf.pools(prev) if prev else None
+    has_prev_reasons = bool(prev_reasons) and pp is not None and bool(pp["zt"])
     prev_boards = {r["code"]: int(r.get("boards") or 1) for r in (pp["zt"] if pp else [])}
 
+    prev_covered = sum(bool(_tags(prev_reasons.get(code, ""))) for code in prev_boards)
+    prev_complete = bool(prev_boards) and prev_covered == len(prev_boards)
     groups: dict[str, dict] = {}
 
     def g(tag: str) -> dict:
@@ -149,11 +156,14 @@ def build(date: str, prev: Optional[str] = None, top: int = 10) -> dict:
         r = zt_by_code.get(str(code).zfill(6))
         if r is None:
             continue                 # 问财有、东财涨停池没有 → 不计入覆盖
+        tags = _tags(reason)
+        if not tags:
+            continue
         matched += 1
         b = int(r.get("boards") or 1)
         stat = str(r.get("zt_stat") or "") or None
         t = str(r.get("first_seal") or "").strip()
-        for tag in _tags(reason):
+        for tag in tags:
             grp = g(tag)
             grp["limit_up"] += 1
             grp["highest"] = max(grp["highest"], b)
@@ -170,6 +180,12 @@ def build(date: str, prev: Optional[str] = None, top: int = 10) -> dict:
                 "_h": max(b, mf.stat_boards(stat)),
                 "first_seal": t or None, "broken_times": int(r.get("broken_times") or 0),
             })
+
+    # 昨日题材即使今天没有涨停也保留，避免整条失去反馈的题材消失。
+    for code, reason in prev_reasons.items():
+        if code in prev_boards:
+            for tag in _tags(reason):
+                g(tag)
 
     # 今天炸板/跌停的票也归到它们的题材下（用昨日题材串兜底 —— 今天没涨停就没有今日串）
     for codes, key in ((zb_codes, "broken"), (today_dt_codes, "limit_down")):
@@ -194,10 +210,10 @@ def build(date: str, prev: Optional[str] = None, top: int = 10) -> dict:
             elif code in zb_codes or code in today_dt_codes:
                 grp["prev_broken_or_down"] += 1
 
+    if matched == 0 and not any(grp["prev_members"] for grp in groups.values()):
+        return {"available": False, "reason": "涨停原因与当日涨停池未匹配出有效事件题材，未生成题材树"}
     out = []
     for grp in groups.values():
-        if grp["limit_up"] < 1:
-            continue
         ts = sorted(grp.pop("seal_times"))
         attempts = grp["limit_up"] + grp["broken"]
         grp["first_seal"] = ts[0] if ts else None       # 该题材第一只涨停的时间
@@ -207,7 +223,7 @@ def build(date: str, prev: Optional[str] = None, top: int = 10) -> dict:
         grp["continuation_rate"] = (round(grp["prev_still_up"] / grp["prev_members"], 3)
                                     if grp["prev_members"] else None)
         # 状态标签只由客观读数推出，不含前瞻判断
-        grp["state"] = _state_of(grp, has_prev_reasons)
+        grp["state"] = _state_of(grp, has_prev_reasons, prev_complete)
         grp["members"] = sorted(grp["members"], key=lambda x: -x["_h"])[:8]
         for m in grp["members"]:
             m.pop("_h", None)
@@ -219,8 +235,11 @@ def build(date: str, prev: Optional[str] = None, top: int = 10) -> dict:
         "available": True,
         "date": date,
         "prev_date": prev,
+        "source_note": f"昨日有效题材覆盖{prev_covered}/{len(prev_boards)}只；仅对已覆盖样本计算延续。显示当日前列题材，并补列最多6条昨日未再涨停题材。 " + (err or "来源：问财目标日涨停原因；源站归因非公司确认。") + (" 昨日涨停池或题材基线不可用，不能判定题材新出现。" if not has_prev_reasons else ""),
         "tag_count": len(out),
-        "themes": out[:top],
+        "prev_covered": prev_covered,
+        "prev_total": len(prev_boards),
+        "themes": out[:top] + [g for g in out[top:] if not g["limit_up"] and g["prev_members"]][:6],
         # 头部集中度：第一题材占全市场涨停的比例
         "concentration": round(out[0]["limit_up"] / total_zt, 3) if out and total_zt else None,
         # 覆盖率 = 对上涨停池的只数 / 涨停家数。问财返回的条数可能多于涨停池（口径差异），
@@ -231,7 +250,7 @@ def build(date: str, prev: Optional[str] = None, top: int = 10) -> dict:
     }
 
 
-def _state_of(grp: dict, has_prev: bool = True) -> str:
+def _state_of(grp: dict, has_prev: bool = True, prev_complete: bool = True) -> str:
     """题材状态标签。**只由已发生的读数推出**，不含对明天的判断"""
     lu, hi = grp["limit_up"], grp["highest"]
     prev_n = grp["prev_members"]
@@ -240,8 +259,10 @@ def _state_of(grp: dict, has_prev: bool = True) -> str:
 
     if not has_prev:
         return "无昨日题材数据"
+    if lu == 0 and prev_n:
+        return "昨日题材未再涨停"
     if prev_n == 0:
-        return "今日新出现"
+        return "今日新出现" if prev_complete else "昨日覆盖样本未见"
     if cont is not None and cont <= 0.15 and lu <= 2:
         return "接力断档"
     if br >= 0.5:
@@ -262,6 +283,8 @@ def render(tree: dict) -> str:
     cr = tree.get("coverage_rate")
     lines = [f"[题材事件树 {tree['date']}｜题材串覆盖 {tree['covered']}/{tree['total_limit_up']} 只涨停"
              + (f"（{cr:.0%}）" if cr is not None else "") + "]"]
+    if tree.get("source_note"):
+        lines.append(tree["source_note"])
     for t in tree["themes"]:
         seg = (f"· {t['tag']}［{t['state']}］涨停{t['limit_up']}"
                f"（首板{t['first_boards']}/连板{t['consec_boards']}）最高{t['highest']}板")

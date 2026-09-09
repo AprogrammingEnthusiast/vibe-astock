@@ -1,7 +1,7 @@
 import { toast } from "sonner";
 import { accountRequest, sharedWebsite, websiteUser, logoutWebsite, accountKey } from "@/lib/account";
 import { saveWatch } from "@/lib/watchlist";
-import { clearLlm } from "@/lib/llm";
+
 
 export function AccountPanel({ refresh }: { refresh: () => Promise<unknown> }) {
   if (!sharedWebsite) return null;
@@ -12,7 +12,7 @@ export function AccountPanel({ refresh }: { refresh: () => Promise<unknown> }) {
     <div className="mt-3 flex flex-wrap gap-3">
       <button className={button} onClick={() => void logoutWebsite().catch(e => toast.error(e.message))}>退出网站账号</button>
       <button className={button} onClick={async () => {
-        try { await accountRequest("/api/cli/codex/logout", "POST"); await clearLlm(); await refresh(); window.location.reload(); }
+        try { await accountRequest("/api/review-agent/access/logout", "POST"); localStorage.removeItem(accountKey("astock-agent-connection")); await refresh(); window.location.reload(); }
         catch (e) { toast.error(e instanceof Error ? e.message : "断开失败"); }
       }}>断开我的 Codex</button>
       {websiteUser?.admin && <button className={button} onClick={async () => {

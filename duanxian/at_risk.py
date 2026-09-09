@@ -32,6 +32,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 from typing import Optional
 
@@ -48,17 +49,19 @@ def load_equity_base() -> Optional[float]:
     ⚠️ 没填就是 None，**不要拿历史最大投入之类的东西估一个** —— 估大了占比偏小，
     正好在"有没有超限"这个判断上出错。
     """
-    if not os.path.isfile(_BASE_PATH):
+    if not os.path.exists(_BASE_PATH):
         return None
     try:
         with open(_BASE_PATH, encoding="utf-8") as fh:
             env = json.load(fh)
-        if env.get("schema") == _BASE_SCHEMA:
-            v = float(env.get("equity_base"))
-            return v if v > 0 else None
-    except Exception:  # noqa: BLE001  坏了当没填
-        pass
-    return None
+        if not isinstance(env, dict) or env.get("schema") != _BASE_SCHEMA or isinstance(env.get("equity_base"), bool):
+            raise ValueError()
+        v = float(env.get("equity_base"))
+        if not math.isfinite(v) or v <= 0:
+            raise ValueError()
+        return v
+    except (OSError, ValueError, TypeError) as exc:
+        raise ValueError("账户规模文件损坏或无法读取；原文件已保留，请重新填写") from exc
 
 
 def save_equity_base(value: float) -> dict:
@@ -66,7 +69,7 @@ def save_equity_base(value: float) -> dict:
         v = float(value)
     except (TypeError, ValueError) as exc:
         raise ValueError("账户规模必须是数字") from exc
-    if v != v or v <= 0:
+    if isinstance(value, bool) or not math.isfinite(v) or v <= 0:
         raise ValueError("账户规模必须是正数")
     os.makedirs(_DIR, exist_ok=True)
     if not atomic_write_json(_BASE_PATH, {"schema": _BASE_SCHEMA, "equity_base": v}):
@@ -122,9 +125,9 @@ def report() -> dict:
     from . import journal, risk
 
     try:
-        trades = (journal.list_trades(limit=1000) or {}).get("trades") or []
+        trades = (journal.list_trades(limit=None) or {}).get("trades") or []
     except Exception as exc:  # noqa: BLE001
-        return {"available": False, "reason": f"读交易日志失败：{exc}"}
+        return {"available": False, "error": True, "reason": f"读交易日志失败：{exc}"}
 
     pos = positions(trades)
     if not pos:
@@ -170,8 +173,8 @@ def report() -> dict:
     else:
         out["equity_base_hint"] = ("填了账户规模才能给占比 —— 绝对金额说明不了"
                                    "'这个风险相对我的账户算大还是小'。")
-    if max_positions and len(pos) > int(max_positions):
-        out["over_position_limit"] = {"actual": len(pos), "limit": int(max_positions)}
+    if max_positions and len({p["code"] for p in pos}) > int(max_positions):
+        out["over_position_limit"] = {"actual": len({p["code"] for p in pos}), "limit": int(max_positions)}
     # 未设边界的必须显式提示，不能让它静静地不出现在总数里
     if unbounded:
         out["unbounded_note"] = (
@@ -188,7 +191,7 @@ def render(rep: dict) -> str:
     就成了个性化投资建议。
     """
     if not rep.get("available"):
-        return ""
+        return "· 在险资金：" + rep.get("reason", "读取失败") if rep.get("error") else ""
     lines = [f"· 在险资金（{rep['position_count']} 笔在场）："]
     tail = (f"，占账户 {rep['at_risk_of_equity_pct']:.1f}%"
             if rep.get("at_risk_of_equity_pct") is not None else "")

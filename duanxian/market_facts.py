@@ -1,6 +1,8 @@
 """客观市场事实表 —— 复盘要回答的是"今天发生了什么"，不是"明天买什么" """
 
 from __future__ import annotations
+from .pool_source import frame as pool_frame
+from .cache_policy import fresh as cache_fresh, write as write_cache
 
 import os
 from typing import Optional
@@ -125,14 +127,14 @@ def _raw_rows(df) -> list[dict]:
 def pools(date: str) -> Optional[dict]:
     """某日三池的**完整明细**。取数失败返回 None（不把失败伪装成空表）。
 
-    历史日落盘缓存 —— 事实不会变，且这三次请求是本模块所有派生表的共同上游。
+    历史日落盘缓存，近期按时效刷新并保留修订；三池是派生表的共同上游。
 
     返回的 dict 里除了归一化的 `zt/zb/dt`，还带 **`raw`**（源的原样行）供归档用 ——
     这样归档拿到真正的原始数据，而**不额外发一次网络请求**。
     """
     path = os.path.join(_CACHE_DIR, f"{date}.json")
     settled = trade_calendar.is_settled(date)
-    if settled and os.path.isfile(path):
+    if settled and os.path.isfile(path) and cache_fresh(path, date):
         try:
             import json
 
@@ -148,12 +150,12 @@ def pools(date: str) -> Optional[dict]:
         import akshare as ak
 
         d = date.replace("-", "")
-        zt_df = ak.stock_zt_pool_em(date=d)
+        zt_df = pool_frame("zt", d)
         zt = _df_rows(zt_df, _ZT_MAP)
         if not zt:
             return None       # 涨停池空 = 非交易日或数据未更新，别继续
-        zb_df = ak.stock_zt_pool_zbgc_em(date=d)
-        dt_df = ak.stock_zt_pool_dtgc_em(date=d)
+        zb_df = pool_frame("zb", d)
+        dt_df = pool_frame("dt", d)
         zb = _df_rows(zb_df, _ZB_MAP)
         dt = _df_rows(dt_df, _DT_MAP)
         raw = {"zt": _raw_rows(zt_df), "zb": _raw_rows(zb_df), "dt": _raw_rows(dt_df)}
@@ -162,7 +164,7 @@ def pools(date: str) -> Optional[dict]:
 
     out = {"zt": zt, "zb": zb, "dt": dt, "raw": raw}
     if settled:
-        atomic_write_json(path, {"schema": _FACTS_SCHEMA, "date": date, "pools": out})
+        write_cache(path, {"schema": _FACTS_SCHEMA, "date": date, "pools": out})
     return out
 
 
@@ -239,6 +241,7 @@ def loss_effect(date: str, prev: Optional[str] = None) -> dict:
         if got:
             n = len(got)
             deep5 = [r for r in got if r["ret"] <= -5]
+            today_pools = pools(date)
             return {
                 "available": True, "prev_date": prev, "source": "settled",
                 "sample": n, "coverage": n, "coverage_rate": 1.0, "partial": False,
@@ -249,9 +252,9 @@ def loss_effect(date: str, prev: Optional[str] = None) -> dict:
                 # 定稿记录没有跌停价字段，所以按**各自制度**的跌幅上限判
                 "limit_down_count": sum(1 for r in got if _is_limit_down(r)),
                 "worst": round(min(r["ret"] for r in got), 2),
-                "market_limit_down": None,      # 需要今日跌停池，定稿路径给不了
+                "market_limit_down": len(today_pools["dt"]) if today_pools is not None else None,
                 "prev_broken_recovery": None,   # 需要昨日炸板股，定稿记录不含
-                "note": "由定稿记录算；「昨日炸板股修复」与「全市场跌停家数」需当日实时池，本次未计",
+                "note": "昨日强势股由定稿记录算；全市场跌停另取所选日东财池。昨日炸板股修复未覆盖。" + (" 所选日跌停池未获取。" if today_pools is None else ""),
             }
 
     ok, why = trade_calendar.live_quotes_are_close_of(date)
@@ -349,6 +352,8 @@ def feedback_matrix(date: str, prev: Optional[str] = None) -> dict:
     if srows:
         got = [r for r in srows if r.get("ret") is not None]
         if got:
+            today_pool = pools(date)
+            today_codes = {r["code"] for r in today_pool["zt"]} if today_pool is not None else None
             def tier(b: int) -> str:
                 # 板位写具体高度（3板/4板/…/9板），不再笼统归成「3板及以上」
                 return "首板" if b <= 1 else f"{b}板"
@@ -358,7 +363,7 @@ def feedback_matrix(date: str, prev: Optional[str] = None) -> dict:
             for r in got:
                 b = int(r.get("prev_boards") or 1)
                 t = tier(b)
-                res = ("晋级涨停" if is_limit_up(r) else
+                res = ("晋级涨停" if (r["code"] in today_codes if today_codes is not None else is_limit_up(r)) else
                        # 跌停按**这只票自己的制度**判（10cm / 20cm / ST 各不同）。
                        # 一刀 -9.8% 会把 20cm 跌 12% 的票打成"跌停"；
                        # 涨的那一侧早就是制度感知的（is_limit_up 走涨停价）。
@@ -378,8 +383,8 @@ def feedback_matrix(date: str, prev: Optional[str] = None) -> dict:
                 "available": True, "prev_date": prev, "source": "settled",
                 "sample": len(details), "coverage": len(details),
                 "coverage_rate": 1.0, "partial": False,
-                "order": _RESULT_ORDER, "matrix": matrix, "details": details,
-                "note": "由定稿记录算；定稿记录不含昨日炸板股，故缺「昨日炸板」这一档",
+                "result_order": _RESULT_ORDER, "matrix": matrix, "details": details,
+                "note": "涨跌幅取昨日强势股当日记录；晋级以本次东财涨停池成员为准。记录不含昨日炸板股，故缺「昨日炸板」这一档。" if today_codes is not None else "本次涨停池未取得，晋级仅按历史收盘价推定，不能与池成员晋级率直接比较；昨日炸板股未覆盖。",
             }
 
     ok, why = trade_calendar.live_quotes_are_close_of(date)

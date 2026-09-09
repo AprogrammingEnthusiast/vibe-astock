@@ -1,3 +1,4 @@
+import { accountKey } from "@/lib/account";
 export interface HeadlineTranslationInput {
   id: string;
   title: string;
@@ -44,7 +45,7 @@ export function splitHeadlineBatches(items: HeadlineTranslationInput[]): Headlin
 
 export function loadHeadlineTranslationCache(): Map<string, string> {
   try {
-    const rows = JSON.parse(localStorage.getItem(CACHE_KEY) ?? "[]") as unknown;
+    const rows = JSON.parse(localStorage.getItem(accountKey(CACHE_KEY)) ?? "[]") as unknown;
     if (!Array.isArray(rows)) return new Map();
     return new Map(rows.slice(-1200).filter((row): row is [string, string] =>
       Array.isArray(row) && row.length === 2 && typeof row[0] === "string" &&
@@ -57,6 +58,6 @@ export function loadHeadlineTranslationCache(): Map<string, string> {
 
 export function saveHeadlineTranslationCache(cache: Map<string, string>): void {
   try {
-    localStorage.setItem(CACHE_KEY, JSON.stringify([...cache.entries()].slice(-1200)));
+    localStorage.setItem(accountKey(CACHE_KEY), JSON.stringify([...cache.entries()].slice(-1200)));
   } catch { /* 缓存不可用时仍展示原题 */ }
 }

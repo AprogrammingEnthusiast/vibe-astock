@@ -86,7 +86,7 @@ def trade_dates_ending_at(end_date: str, n: int = 10) -> list[str]:
 _QUOTE_URL = "http://qt.gtimg.cn/q="
 _F_QUOTE_TIME = 30      # 腾讯实时行情的时间戳字段，形如 20260724161450
 _QUOTE_DAY_TTL = 120.0
-_QUOTE_DAY_BOUNDARIES = ((9, 15), (15, 5))    # 开盘（集合竞价）/ 收盘定稿
+_QUOTE_DAY_BOUNDARIES = ((9, 15), (9, 25), (9, 30), (11, 30), (13, 0), (14, 57), (15, 0), (15, 5))    # 开盘（集合竞价）/ 收盘定稿
 _quote_day_cache: dict[str, object] = {}      # {"day": …, "until": 单调时钟}
 _quote_day_lock = threading.Lock()
 
@@ -150,7 +150,7 @@ def latest_session() -> Optional[str]:
 
 
 def is_settled(date: str) -> bool:
-    """date 的盘面数据是否已定稿、不会再变 —— 落盘缓存的唯一判据"""
+    """date 是否已经收盘，可以保存快照；不代表上游此后不会修订"""
     return date < china_today() or date == latest_session()
 
 
@@ -184,3 +184,36 @@ def live_quotes_are_close_of(date: str) -> tuple[bool, str]:
         return False, (f"当前是交易时段，实时行情是**今天盘中**的价，"
                        f"不能当作 {date} 的收盘表现 —— 今天这一场要等收盘才有定稿数据")
     return True, ""
+
+
+def session_phase(now: datetime.datetime, quote_day: Optional[str]) -> dict:
+    """沪深竞价、连续交易和休市分段；旧日期行情不能认作今日交易。"""
+    today = now.strftime("%Y-%m-%d")
+    hm = now.hour * 60 + now.minute
+    if not quote_day:
+        key, label = "unknown", "行情日期未确认"
+    elif now.weekday() >= 5 or quote_day != today:
+        key, label = "closed", f"尚无今日行情 · 显示 {quote_day} 数据"
+    elif hm < 555:
+        key, label = "closed", "盘前 · 尚未开始竞价"
+    elif hm < 565:
+        key, label = "auction", "集合竞价 · 试撮合报价，尚未成交"
+    elif hm < 570:
+        key, label = "wait", "竞价结束 · 等待连续交易"
+    elif hm < 690:
+        key, label = "open", "盘中 · 连续交易"
+    elif hm < 780:
+        key, label = "break", "午间休市 · 上午末笔行情"
+    elif hm < 897:
+        key, label = "open", "盘中 · 连续交易"
+    elif hm < 900:
+        key, label = "closing", "收盘集合竞价 · 试撮合报价"
+    else:
+        key, label = "closed", "已收盘 · 等待数据定稿" if hm < 905 else "已收盘"
+    if key == "closed" and (quote_day != today or hm < 555):
+        return {"phase_key": key, "phase": "盘前" if now.weekday() < 5 and hm < 555 else "尚无今日行情",
+                "label": label, "poll": False}
+    names = {"unknown": "未知", "closed": "已收盘", "auction": "集合竞价",
+             "wait": "竞价结束", "open": "盘中", "break": "午间休市", "closing": "收盘竞价"}
+    return {"phase_key": key, "phase": names[key], "label": label,
+            "poll": key in {"auction", "wait", "open", "closing"}}

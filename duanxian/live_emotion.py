@@ -70,7 +70,8 @@ def _pool(kind: str, ymd: str) -> Optional[list[dict]]:
     if fetch is None:
         return None
     try:
-        return fetch(kind, ymd, "fbt:asc") or []
+        result = fetch(kind, ymd, "fbt:asc")
+        return result if isinstance(result, list) else None
     except Exception:  # noqa: BLE001  取不到就整块标不可用
         return None
 
@@ -83,6 +84,12 @@ def snapshot() -> dict:
     """今日实时打板情绪。非交易时段 / 取不到数据 → available=False 并说明原因。"""
     today = china_now().strftime("%Y-%m-%d")
     ymd = today.replace("-", "")
+    quote_day = trade_calendar.quote_trade_day()
+    phase = trade_calendar.session_phase(china_now(), quote_day)
+    if quote_day != today:
+        return {"available": False, "date": today, "reason": phase["label"] + "；未取得本场行情，不计算今日晋级率"}
+    if phase["phase_key"] in {"auction", "wait", "unknown", "closing"}:
+        return {"available": False, "date": today, "reason": phase["label"] + "；连续交易情绪统计稍后更新"}
 
     settled = _cached(f"settled:{today}", _CAL_TTL,
                       lambda: ("Y" if trade_calendar.is_settled(today) else "N")) == "Y"
@@ -122,7 +129,8 @@ def snapshot() -> dict:
         "available": True,
         "date": today,
         "as_of": china_now().strftime("%H:%M"),
-        "phase": "盘中" if not settled else "已收盘",
+        "phase": phase["label"],
+        "settled": settled,
         "zt_count": zt_n,
         "dt_count": len(dt) if dt is not None else None,
         "zb_count": zb_n,

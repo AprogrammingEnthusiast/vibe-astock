@@ -46,7 +46,10 @@ def _ensure_mimo_loaded() -> None:
             raise RuntimeError(
                 f"找不到 MiMo 凭据文件 {_MIMO_ENV}；请确认 ~/.config/mimo/mimo.env 存在。"
             )
-        creds.update({k: v for k, v in dotenv_values(_MIMO_ENV).items() if v})
+        # 文件补齐缺失项，不能盖掉用户显式设置的端点或两档模型。
+        for k, v in dotenv_values(_MIMO_ENV).items():
+            if v:
+                creds.setdefault(k, v)
     if not creds.get("MIMO_API_KEY"):
         raise RuntimeError("MIMO_API_KEY 未设置（mimo.env 里没有或为空）。")
     _CREDS = creds

@@ -45,6 +45,9 @@ export async function initializeAccount() {
   if (!websiteUser) return;
   localStorage.setItem(accountKey("vr-watchlist"), JSON.stringify(data.watchlist ?? []));
   const profile = await accountRequest("/api/personal/llm");
+  const connection = await accountRequest("/api/personal/agent-connection");
+  if (connection.llm) localStorage.setItem(accountKey("astock-agent-connection"), JSON.stringify(connection.llm));
+  else localStorage.removeItem(accountKey("astock-agent-connection"));
   if (profile.llm) localStorage.setItem(accountKey("vr-llm"), JSON.stringify(profile.llm));
   else localStorage.removeItem(accountKey("vr-llm"));
 }
@@ -52,6 +55,8 @@ export async function initializeAccount() {
 export async function logoutWebsite() {
   await accountRequest("/api/account/logout", "POST");
   localStorage.removeItem(accountKey("vr-llm"));
+  localStorage.removeItem(accountKey("astock-agent-connection"));
+  sessionStorage.clear();
   localStorage.setItem("vibe-account-changed", String(Date.now()));
   window.location.reload();
 }

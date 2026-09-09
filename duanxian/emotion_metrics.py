@@ -1,6 +1,7 @@
 """派生情绪指标 —— 短线复盘真正的命根子"""
 
 from __future__ import annotations
+from .cache_policy import fresh as cache_fresh, write as write_cache
 
 import json
 import os
@@ -26,7 +27,7 @@ def _tx_symbol(code: str) -> str:
     return f"sh{code}" if code.startswith("6") else f"sz{code}"
 
 
-def batch_pct(codes: list[str]) -> dict[str, float]:
+def batch_pct(codes: list[str], *, opening_date: str | None = None) -> dict[str, float]:
     """批量取当前涨跌幅 {code: pct}。单批失败只丢该批，不影响其它批。"""
     out: dict[str, float] = {}
     uniq = list(dict.fromkeys(str(c).zfill(6) for c in codes if c))
@@ -45,31 +46,48 @@ def batch_pct(codes: list[str]) -> dict[str, float]:
                 continue
             code = f[0].split("=")[0].strip().strip('"')[-6:]
             try:
-                out[code] = float(f[_F_PCT])
+                if opening_date:
+                    import math
+                    stamp = f[30]
+                    opened, previous = float(f[5]), float(f[4])
+                    if (stamp[:8] != opening_date.replace("-", "") or stamp[8:12] < "0925"
+                            or not math.isfinite(opened) or not math.isfinite(previous)
+                            or opened <= 0 or previous <= 0):
+                        continue
+                    out[code] = (opened / previous - 1) * 100
+                else:
+                    value = float(f[_F_PCT])
+                    if __import__("math").isfinite(value):
+                        out[code] = value
             except (ValueError, IndexError):
                 continue
     return out
 
 
 _POOL_CACHE: dict[str, dict] = {}
+_POOL_TIMES: dict[str, float] = {}
 _POOL_CACHE_MAX = 240   # 约一年交易日；上界防常驻进程无限增长
 
 
 def _zt_pool(date: str) -> Optional[dict]:
     """取某日涨停池；失败或标了 error_zt 一律返回 None（不把失败伪装成 0 家）。"""
+    import time
     settled = trade_calendar.is_settled(date)
-    if settled and date in _POOL_CACHE:
+    if settled and date in _POOL_CACHE and time.monotonic() - _POOL_TIMES.get(date, 0) < 300:
         return _POOL_CACHE[date]
     try:
         zt = dr.fetch_zt_pool(date.replace("-", ""))
     except Exception:  # noqa: BLE001
         return None
-    if not zt or zt.get("error_zt") or zt.get("zt") is None:
+    if not zt or zt.get("error_zt") or zt.get("zt") is None or len(zt["zt"]) == 0:
         return None
     if settled:
         if len(_POOL_CACHE) >= _POOL_CACHE_MAX:
             _POOL_CACHE.pop(next(iter(_POOL_CACHE)), None)   # 简单 FIFO 淘汰
         _POOL_CACHE[date] = zt
+        _POOL_TIMES[date] = time.monotonic()
+        for key in list(_POOL_TIMES):
+            if key not in _POOL_CACHE: _POOL_TIMES.pop(key, None)
     return zt
 
 
@@ -177,7 +195,7 @@ def _stats_from_pool(rows: list[dict], today_codes: Optional[set]) -> dict:
     vals = [r["ret"] for r in rows if r.get("ret") is not None]
     if not vals:
         return {}
-    again = [r for r in rows if r.get("ret") is not None and is_limit_up(r)]
+    again = [r for r in rows if r.get("ret") is not None and (r["code"] in today_codes if today_codes is not None else is_limit_up(r))]
     return {
         "available": True,
         "sample": len(vals),
@@ -187,7 +205,7 @@ def _stats_from_pool(rows: list[dict], today_codes: Optional[set]) -> dict:
         "avg": round(mean(vals), 2),
         "median": round(median(vals), 2),
         "positive_rate": round(sum(1 for v in vals if v > 0) / len(vals), 3),
-        # 定稿记录里有涨停价，直接判"今天又封住了没"，比比对今日池子更可靠
+        # 优先和晋级率共用东财池成员；无池时只保留历史价格推定口径
         "limit_up_again_rate": round(len(again) / len(vals), 3),
         "source": "settled",
     }
@@ -201,7 +219,8 @@ def money_effect(date: str, prev: Optional[str] = None) -> dict:
     prev = prev or trade_calendar.prev_trade_date(date)
     rows = _settled_pool(date)
     if rows:
-        stats = _stats_from_pool(rows, None)
+        today_pool = _zt_pool(date)
+        stats = _stats_from_pool(rows, _pool_codes(today_pool) if today_pool is not None else None)
         if stats:
             return {**stats, "prev_date": prev}
 
@@ -245,7 +264,7 @@ def money_effect(date: str, prev: Optional[str] = None) -> dict:
 
 
 def consec_premium(date: str, prev: Optional[str] = None) -> dict:
-    """连板溢价：昨日 2 板以上个股在目标日的平均涨幅 = 高标承接度。
+    """连板溢价：昨日 2 板以上个股在目标日的平均涨幅；只描述样本表现，不单独判断承接。
 
     同 `money_effect`：定稿记录优先，实时行情兜底。
     """
@@ -282,7 +301,7 @@ def consec_premium(date: str, prev: Optional[str] = None) -> dict:
     if cov["coverage_rate"] is not None and cov["coverage_rate"] < _COVERAGE_MIN:
         return {"available": False,
                 "reason": f"批量行情只取到 {len(vals)}/{len(codes)} 只"
-                          f"（{cov['coverage_rate']:.0%}），样本不足以代表高标承接度",
+                          f"（{cov['coverage_rate']:.0%}），样本不足以代表昨日连板股表现",
                 **cov}
     return {
         "available": True,
@@ -323,7 +342,7 @@ def ladder_gap(date: str) -> dict:
         "gaps": gaps,
         "continuous": not gaps,
         "note": ("全市场板位结构连续（注：跨题材，不代表同一题材内部有梯队）" if not gaps
-                 else f"板位缺档 {'、'.join(f'{g}板' for g in gaps)} → 最高标下方断层，断板后没有下一梯队承接"),
+                 else f"板位缺档 {'、'.join(f'{g}板' for g in gaps)} → 最高标下方断层，是否有同题材承接需另查，板位缺档本身不能判定"),
     }
 
 
@@ -336,7 +355,7 @@ _SUMMARY_SOURCE = "akshare_zt_pool"
 def _summarize(zt: dict) -> Optional[dict]:
     """把一天的涨停池压成三个原始读数（都不依赖行情，任意历史日可算）。"""
     df = zt.get("zt")
-    if df is None:
+    if df is None or len(df) == 0:
         return None
     n_zt = int(len(df))
     n_zb = int(zt.get("zb_count", 0) or 0)
@@ -349,7 +368,7 @@ def day_summary(date: str) -> Optional[dict]:
     """某日的情绪原始读数，**历史日落盘缓存**"""
     is_past = trade_calendar.is_settled(date)
     path = os.path.join(_SUMMARY_CACHE_DIR, f"{date}.json")
-    if is_past and os.path.isfile(path):
+    if is_past and os.path.isfile(path) and cache_fresh(path, date):
         try:
             with open(path, encoding="utf-8") as fh:
                 env = json.load(fh)
@@ -361,6 +380,7 @@ def day_summary(date: str) -> Optional[dict]:
                 and env.get("source") == _SUMMARY_SOURCE
                 and env.get("date") == date
                 and isinstance(env.get("summary"), dict)
+                and env["summary"].get("limit_up", 0) > 0
             ):
                 return env["summary"]
         except Exception:  # noqa: BLE001  缓存坏了就当没有，重新取
@@ -369,7 +389,7 @@ def day_summary(date: str) -> Optional[dict]:
     zt = _zt_pool(date)
     s = _summarize(zt) if zt is not None else None
     if s and is_past:
-        atomic_write_json(
+        write_cache(
             path,
             {"schema": _SUMMARY_SCHEMA, "source": _SUMMARY_SOURCE, "date": date, "summary": s},
         )

@@ -91,6 +91,7 @@ def test_private_proxy_is_bound_to_session_and_preserves_streams(site, monkeypat
     alice, bob = site
     calls, closed = [], []
     def fake_request(method, url, **kwargs):
+        assert kwargs["headers"]["Host"] == "localhost"
         calls.append((url, kwargs))
         return SimpleNamespace(status_code=200, headers={"Content-Type": "application/x-ndjson"},
             iter_content=lambda **kw: iter([b'{"type":"delta","text":"ok"}\n', b'{"type":"done"}\n']),
@@ -218,7 +219,7 @@ def test_shared_review_reuses_completed_result_before_credentials(monkeypatch, s
     monkeypatch.setattr(server, "_job", {"running": False})
     starts = []
     monkeypatch.setattr(server.threading, "Thread", lambda **kw: SimpleNamespace(start=lambda: starts.append(kw)))
-    result = TestClient(server.app).post("/api/review/run?date=2026-09-07&regenerate=true")
+    result = TestClient(server.app, base_url="http://localhost").post("/api/review/run?date=2026-09-07&regenerate=true")
     assert not starts
     if source in {"shared", "local"}:
         assert result.status_code == 200 and result.json()["already_done"]

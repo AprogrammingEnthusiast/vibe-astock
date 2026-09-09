@@ -49,6 +49,7 @@
 """
 
 from __future__ import annotations
+from .cache_policy import fresh as cache_fresh, write as write_cache
 
 import hashlib
 import json
@@ -75,7 +76,7 @@ def _fetch_prev_pool(date: str) -> Optional[list[dict]]:
     """取「前一交易日涨停股在 date 当天的表现」，数据定稿后落盘缓存。"""
     is_past = trade_calendar.is_settled(date)   # 含"今天且已收盘"——语料过期不候
     path = os.path.join(_CACHE_DIR, f"{date}.json")
-    if is_past and os.path.isfile(path):
+    if is_past and os.path.isfile(path) and cache_fresh(path, date):
         try:
             with open(path, encoding="utf-8") as fh:
                 return json.load(fh)
@@ -113,7 +114,7 @@ def _fetch_prev_pool(date: str) -> Optional[list[dict]]:
         return None
 
     if is_past:
-        atomic_write_json(path, rows)   # 写失败不影响返回，函数内部已吞
+        write_cache(path, rows)   # 写失败不影响返回，函数内部已吞
     return rows
 
 
@@ -349,7 +350,7 @@ def run_backtest(days: int = 60, strategies: Optional[list[str]] = None) -> dict
         # 留着整行（不只是 ret）：再涨停率要按每只票自己的涨停幅度判（见 _limit_pct）
         all_rows: list[dict] = []
         daily = []
-        by_regime: dict[str, list[dict]] = {"情绪强": [], "情绪中": [], "情绪弱": []}
+        by_regime: dict[str, list[dict]] = {"情绪强": [], "情绪中": [], "情绪弱": [], "环境未覆盖": []}
         equity = 100.0
         for d in sorted(per_day):
             ctx = ctx_by_day[d]
@@ -357,8 +358,7 @@ def run_backtest(days: int = 60, strategies: Optional[list[str]] = None) -> dict
             rets = [r["ret"] for r in hit]
             all_rows.extend(hit)
             reg = regimes.get(d, "未知")
-            if reg in by_regime:
-                by_regime[reg].extend(hit)
+            by_regime[reg if reg in by_regime else "环境未覆盖"].extend(hit)
             day_avg = round(mean(rets), 2) if rets else None
             if day_avg is not None:
                 equity *= (1 + day_avg / 100)   # 等权每日满仓，日频复利
@@ -379,8 +379,8 @@ def run_backtest(days: int = 60, strategies: Optional[list[str]] = None) -> dict
         "layer": "market_phenomenon",
         "sample_caveat": (
             "样本 = 昨日**收盘**留在涨停池里的票（事后名单）。"
-            "冲板未封住的、排队未成交的、一字板买不进的都不在内 —— "
-            "真实打板的期望必然低于这里的数字。这是市场现象统计，不是策略回测。"
+            "包含一字板等未必能成交的股票，未排除排队买不到的情况；冲板失败未回封者不在样本内。"
+            "没有成交模拟，不能推导真实收益或打法期望。这是市场现象统计，不是策略回测。"
         ),
         "schema": _RESULT_SCHEMA,
         # 口径 + 语料指纹，读缓存时逐项比对（见 load_result）
@@ -438,7 +438,7 @@ _RESULT_SCHEMA = 2
 # 为什么需要它：filter 是 lambda，没法序列化比对。下面的 fingerprint 能自动抓住
 # 所有**参数**变化（封板时间界、主线取前几、分档边界…），但抓不住"参数没变、逻辑变了"。
 # 那种情况下缓存会继续返回旧数字，而界面完全看不出异样。
-_STRATEGY_REVISION = 6   # v6：加样本偏差披露（layer/sample_caveat）   # v2：分环境改用入场前一日情绪（修前视偏差）——旧缓存 by_regime 口径已错，必须失效
+_STRATEGY_REVISION = 7   # v7：补环境未覆盖桶与可成交性披露；v6：加样本偏差披露（layer/sample_caveat）   # v2：分环境改用入场前一日情绪（修前视偏差）——旧缓存 by_regime 口径已错，必须失效
 
 
 def _corpus_dates_in_window(date_from: Optional[str], date_to: Optional[str]) -> list[str]:
@@ -521,7 +521,7 @@ def prior_context(days: int = 30) -> str:
     lines = [
         f"【策略历史先验｜{bt['date_from']}~{bt['date_to']} 共 {bt['days_used']} 个交易日的统计】",
         "（口径：昨日**收盘**涨停→当日收盘、等权、不含滑点与成交概率；样本是事后名单，"
-        "冲板未封住的不在内 → 真实打板期望必然更低。分环境按入场前一交易日的情绪强弱。"
+        "冲板未封住的不在内，也未完整模拟一字板可成交性、费用与滑点；不能据此推导真实打板期望。分环境按入场前一交易日的情绪强弱。"
         "这是**市场现象统计**，不是策略回测，也不是操作指令。）",
     ]
     for name, r in (bt.get("strategies") or {}).items():

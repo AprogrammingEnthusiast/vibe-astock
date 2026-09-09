@@ -316,7 +316,19 @@ def translate_headlines(cfg: dict, items_input: list) -> list[dict[str, str]]:
     items = _prepare_headlines(items_input)
     payload = json.dumps({"items": items}, ensure_ascii=False)
     provider = str(cfg.get("provider", ""))
-    if provider.startswith("cli-"):
+    if provider in {"codex-private", "claude", "codebuddy", "api-compatible", "openai", "mimo"}:
+        import tempfile
+        import threading
+        from pathlib import Path
+        from review_agent.runtime import Runtime, connection
+        runtime = Runtime(Path(os.environ.get("ASTOCK_AGENT_HOME", "~/.vibe-astock-agent")).expanduser())
+        source, key = connection(cfg)
+        with tempfile.TemporaryDirectory(prefix="translation-", dir=runtime.root) as tmp:
+            run = Path(tmp)
+            (run / ".vibe-astock-root").touch()
+            raw = runtime._invoke(run, source, key, _HEADLINE_TRANSLATION_PROMPT + "\n" + payload,
+                                  threading.Event(), lambda message: None, 120, text_only=True, task_kind="page")
+    elif provider.startswith("cli-"):
         raw = cli_runtime.run_cli(provider[4:], _HEADLINE_TRANSLATION_PROMPT, payload, str(cfg.get("model", "")))
     else:
         data = _call_llm(cfg, [

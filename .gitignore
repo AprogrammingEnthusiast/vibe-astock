@@ -8,7 +8,7 @@ __pycache__/
 .pytest_cache/
 
 # ---- 前端 ----
-node_modules/
+node_modules
 dist/
 .vite/
 
@@ -31,3 +31,6 @@ vr/.cache/
 .DS_Store
 dist-astock/
 .sharing/
+.local/
+# Local build artifacts
+packaging/macos/

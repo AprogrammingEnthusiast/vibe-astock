@@ -38,7 +38,8 @@ def _fetch_reasons(date: str) -> tuple[dict, str | None]:
     返回的列名形如 `涨停原因[20260828]`，下面按子串匹配，不要改成精确等于。
     """
     if not os.environ.get("IWENCAI_API_KEY"):
-        return {}, "未配置 IWENCAI_API_KEY，涨停原因暂缺"
+        from duanxian.fetchers import fetch_zt_reasons
+        return fetch_zt_reasons(date)
     try:
         from iwencai_client import IwencaiClient
 

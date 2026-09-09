@@ -20,7 +20,7 @@ from email.utils import parsedate_to_datetime
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SOURCES_FILE = os.path.join(HERE, "news_sources.json")
-CACHE_DIR = os.path.join(HERE, ".cache")
+CACHE_DIR = os.path.join(os.environ["VR_DATA_DIR"], "cache") if os.environ.get("VR_DATA_DIR") else os.path.expanduser("~/.vibe-astock-agent/market-data/cache")
 CACHE_FILE = os.path.join(CACHE_DIR, "radar.json")
 
 UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "

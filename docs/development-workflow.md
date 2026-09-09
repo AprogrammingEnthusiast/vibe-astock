@@ -9,7 +9,8 @@
 - 行情、资讯、盯盘和对话：读 `vr/app.py` 及对应模块。`server.py` 将 VR 的 `/api/*` 路由并入同一服务；保留现有导入方式，避免破坏从上游同步的结构。
 - 前端：从 `frontend/src/router.tsx` 找页面；请求和状态逻辑在 `frontend/src/lib/`，复用组件在 `frontend/src/components/`。
 - 共享账号、邀请、凭证、部署或迁移：先读 `SHARING.md`；网关 `sharing.py`、管理 `sharing_admin.py`、实例同步 `sharing_worker.py`、公共字段白名单 `sharing_schema.py`。
-- 模型接入：复盘走 `duanxian/config.py`、`duanxian/cli_llm.py`；对话与 CLI 运行时看 `vr/chat.py`、`vr/cli_runtime.py`。修改模型选择或凭证处理时检查两条调用链。
+- 新版网页 AI：`review_agent/api.py` 管理任务，`review_agent/runtime.py` 运行隔离模型，`frontend/src/lib/agent-api.ts` 保存本人连接；共享适配见 `sharing_worker.py`。
+- 旧版 CLI 模型接入：复盘走 `duanxian/config.py`、`duanxian/cli_llm.py`；对话与 CLI 运行时看 `vr/chat.py`、`vr/cli_runtime.py`。修改模型选择或凭证处理时检查两条调用链。
 
 ## 修改与验证
 
@@ -26,13 +27,14 @@
 常用命令（从仓库根目录运行，`python` 指已安装项目依赖的解释器；Windows 虚拟环境通常为 `.venv\Scripts\python.exe`）：
 
 ```powershell
-python -m pytest -q
+python -m pytest tests backtest/tests research_data/tests -q
+node --test frontend/test/*.test.ts
 npm --prefix frontend run build
 node frontend/tests/codex-reconnect.mjs
 node frontend/tests/sector-flow.mjs
 ```
 
-两个 Node 检查分别用于 Codex 重连和板块资金图，按改动范围选择。共享账号、登录或模型配置变更至少覆盖 `tests/test_sharing.py`、`tests/test_codex_device_auth.py`、`tests/test_cli_model_selection.py`。
+上游 Node 测试覆盖新版网页逻辑；两个额外 Node 检查分别用于新版 Codex 重连与本人配置保存、板块资金图，按改动范围选择。共享账号、登录或模型配置变更至少覆盖 `tests/test_sharing.py`、`tests/test_codex_device_auth.py`、`tests/test_cli_model_selection.py`。
 
 单用户启动用 `python server.py`（后端默认 8910，服务 `frontend/dist`）；开发前端用 `npm --prefix frontend run dev`（默认 5910，代理至 `127.0.0.1:8910`）。共享部署按 `SHARING.md` 使用生成的 `.sharing/compose.json`；根目录 `compose.yaml` 是单用户模式。
 

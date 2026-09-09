@@ -81,6 +81,7 @@ export function Matrix({ fm }: { fm?: FeedbackMatrix }) {
       available={fm?.available}
       reason={fm?.reason}
     >
+      {fm?.note && <p role="status" className="mb-2 text-xs text-warning">{fm.note}</p>}
       {tiers.length === 0 ? (
         <p className="text-[13px] text-muted-foreground/70">无可统计分档</p>
       ) : (
@@ -341,7 +342,7 @@ export function ThemeTreeView({ t }: { t?: ThemeTree }) {
       icon={Network}
       title="题材事件树"
       hint={
-        "按「真实事件题材」聚合（问财涨停原因），不是行业分类 —— 「兵装重组」「间接投资长鑫科技」"
+        "按涨停原因题材聚合（公开涨停揭秘或问财，源站归因非公司确认），不是行业分类 —— 「兵装重组」「间接投资长鑫科技」"
         + "这类事件在行业分类里找不到。每行按复盘顺序摆：昨日反馈 → 今天几点首封 → 扩散几只 → 梯队多高 → 炸了几个。"
       }
       available={t?.available}
@@ -351,6 +352,7 @@ export function ThemeTreeView({ t }: { t?: ThemeTree }) {
         <p className="text-[13px] text-muted-foreground/70">无可聚合题材</p>
       ) : (
         <>
+          {t?.source_note && <p className="mb-2 text-xs text-muted-foreground">{t.source_note}</p>}
           <div className="space-y-2">
             {themes.map((n) => (
               <div key={n.tag} className="border-b border-border/40 pb-2 last:border-0 last:pb-0">
@@ -453,7 +455,7 @@ export function Ledger({ el }: { el?: EventLedger }) {
     <Section
       icon={ListTree}
       title="关键事件账本"
-      hint="今天值得看的那十几只票自动挑出来。⚠️ 只陈述发生了什么，不排序打分、不给参与倾向。"
+      hint="按公开盘面规则归集已发生的关键事件。只陈述事实，不排序打分、不给参与倾向。"
       caliber={"事件是按规则自动挑的：今日最高板、炸板≥2次又回封、各题材最早封板的那只、\n" +
         "昨日板位最高的断板股（最多 6 只）、跌得最狠的（最多 5 只）。\n" +
         "「今天钱亏在哪」记的是**打板资金吃面的地方**，不是这些票都收跌 ——\n" +
@@ -491,6 +493,7 @@ export function LossEffectSection({ le }: { le?: LossEffect }) {
       available={le?.available}
       reason={le?.reason}
     >
+      {le?.note && <p role="status" className="mb-2 text-xs text-warning">{le.note}</p>}
       <div className="grid grid-cols-3 gap-3 text-center">
         <div>
           <div className={cn("text-xl font-extrabold tabular-nums", countColor("down"))}>{le?.deep_loss_5_count ?? "—"}</div>

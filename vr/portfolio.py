@@ -1,10 +1,10 @@
 """持仓数据层 —— 用户自己录入的持仓 + 实时行情叠加浮动盈亏。
 
-合规：持仓是用户主动录入的自己的标的（存本地 ~/.vibe-research/portfolio.json，
+合规：持仓是用户主动录入的自己的标的（存本地 ~/.vibe-astock-agent/market-data/portfolio.json，
 不上传、不进仓库），不预置任何标的、不含 _SEED 兜底、不做推荐。
-盈亏红涨绿跌（A股口径）。含每半小时后台定时刷新 + 手动刷新。
+盈亏红涨绿跌（A股口径）。仅用于显式导入旧持仓，行情按读取时更新。
 
-存储位置：默认用户目录 ~/.vibe-research/（可用 VR_DATA_DIR 覆盖）——
+存储位置：默认用户目录 ~/.vibe-astock-agent/market-data/（可用 VR_DATA_DIR 覆盖）——
 放仓库外，重新下载/覆盖项目文件夹不会丢数据（issue #12）。
 ≤v0.1.1 存在 backend/.cache/ 仓库内，首次启动自动迁移（复制，旧文件保留作备份）。
 """
@@ -16,7 +16,6 @@ import os
 import shutil
 import sys
 import threading
-import time
 from datetime import datetime, timezone, timedelta
 
 import astock
@@ -24,7 +23,7 @@ import astock
 HERE = os.path.dirname(os.path.abspath(__file__))
 _OLD_PF_FILE = os.path.join(HERE, ".cache", "portfolio.json")  # ≤v0.1.1 旧位置
 # CACHE_DIR 名字保留（测试/外部按此名 monkeypatch），实际已是用户数据目录
-CACHE_DIR = os.environ.get("VR_DATA_DIR") or os.path.join(os.path.expanduser("~"), ".vibe-research")
+CACHE_DIR = os.environ.get("VR_DATA_DIR") or os.path.join(os.path.expanduser("~"), ".vibe-astock-agent", "market-data")
 PF_FILE = os.path.join(CACHE_DIR, "portfolio.json")
 BEIJING = timezone(timedelta(hours=8))
 _LOCK = threading.Lock()
@@ -158,25 +157,4 @@ def get_portfolio() -> dict:
         "closed": closed,
         "realized_pnl": round(sum(c.get("pnl", 0) for c in closed), 2),
         "updated": _now(),
-        "last_refresh": d.get("last_refresh"),
     }
-
-
-def _refresh_snapshot() -> None:
-    """后台定时任务：刷新时间戳（GET 本就实时算，这里记录后台刷新点）。"""
-    with _LOCK:
-        d = _load()
-        d["last_refresh"] = _now()
-        _save(d)
-
-
-def start_scheduler(interval: int = 1800) -> None:
-    """每半小时后台刷新一次持仓数据（daemon 线程）。"""
-    def loop():
-        while True:
-            time.sleep(interval)
-            try:
-                _refresh_snapshot()
-            except Exception:
-                pass
-    threading.Thread(target=loop, daemon=True).start()

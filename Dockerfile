@@ -1,6 +1,9 @@
 FROM node:22-bookworm-slim AS frontend
 ARG CODEX_CLI_VERSION=0.153.4
 RUN npm install --global "@openai/codex@${CODEX_CLI_VERSION}"
+WORKDIR /app/runtime
+COPY runtime/package*.json ./
+RUN npm ci
 WORKDIR /app/frontend
 COPY frontend/package*.json ./
 RUN npm ci
@@ -23,6 +26,10 @@ COPY --from=frontend /usr/local/lib/node_modules/@openai/codex /usr/local/lib/no
 RUN ln -s /usr/local/lib/node_modules/@openai/codex/bin/codex.js /usr/local/bin/codex \
     && codex --version
 COPY main.py server.py sharing.py sharing_schema.py sharing_worker.py sharing_admin.py ./
+COPY --from=frontend /app/runtime /app/runtime
+COPY review_agent/ ./review_agent/
+COPY backtest/ ./backtest/
+COPY research_data/ ./research_data/
 COPY duanxian/ ./duanxian/
 COPY vr/ ./vr/
 COPY --from=frontend /app/frontend/dist ./frontend/dist

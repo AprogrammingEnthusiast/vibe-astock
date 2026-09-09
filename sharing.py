@@ -305,6 +305,13 @@ def public_review(date: str | None = None, version: str | None = None, kind: str
             "published_at": row["created"], "shared": True}}
 
 
+@app.get("/internal/reviews/dates")
+def worker_review_dates(request: Request):
+    user_for(request, worker=True)
+    with connect() as db:
+        return {"dates": [r[0] for r in db.execute("SELECT DISTINCT trade_date FROM reviews WHERE kind='review' ORDER BY trade_date DESC")]}
+
+
 @app.get("/internal/reviews/latest")
 def worker_review(request: Request, date: str | None = None, kind: str = "review", version: str | None = None):
     user_for(request, worker=True)
@@ -349,7 +356,7 @@ def forward(u: dict, method: str, path: str, query: str, content: bytes, content
         upstream = requests.request(method, u["worker"] + "/api/" + path,
             params=query, data=content,
             headers={"X-Vibe-Worker": u["worker_key"], "Authorization": "Bearer " + u["worker_key"],
-                     "Content-Type": content_type}, timeout=(5, 330), stream=True, allow_redirects=False)
+                     "Content-Type": content_type, "Host": "localhost"}, timeout=(5, 330), stream=True, allow_redirects=False)
     except requests.RequestException:
         raise HTTPException(503, "你的工作实例暂时不可用，请稍后重试")
 

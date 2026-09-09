@@ -35,7 +35,7 @@ export function BreadthPanel({ b, limitDown }: { b?: Breadth; limitDown?: number
       <div className="mb-2 flex flex-wrap items-baseline gap-x-3">
         <span className="text-[11px] font-bold uppercase tracking-[0.2em] text-primary">今天好不好做 · Breadth</span>
         <span className="text-[11px] text-muted-foreground">
-          下面所有涨停池的数字，都要拿这一行当分母来读
+          先看全市场宽度，再看涨停样本；统计范围不同，不能混用分母
         </span>
         <Caliber text={
           `涨/跌/平家数取自沪深两市指数的成分统计（${b.up_down_scope}）。\n` +

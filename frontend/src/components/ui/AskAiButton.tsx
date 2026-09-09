@@ -1,3 +1,7 @@
+import { randomId } from "@/lib/random-id";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+import { readMode } from "@/lib/workspace/state";
 import { useState, useRef, useEffect } from "react";
 import { Link } from "react-router-dom";
 import { Sparkles, X, Settings, Send, Loader2, Wrench, AlertCircle } from "lucide-react";
@@ -31,7 +35,7 @@ interface ToolUse { name: string; arg: string }
 
 // 「问 AI」入口 —— 把当前分栏内容作为上下文，调用户自己配置的模型；
 // AI 可自行调 A股数据工具作答。结论由用户模型给出，本产品不校准、不负责。
-export function AskAiButton({ context, suggestions = [], label = "问 AI" }: Props) {
+export function AskAiButton({ context, suggestions = [], label = "问 AI · 本页资料" }: Props) {
   const [open, setOpen] = useState(false);
   const [configured, setConfigured] = useState(false);
   const [msgs, setMsgs] = useState<(ChatMsg & { tools?: ToolUse[] })[]>([]);
@@ -39,6 +43,7 @@ export function AskAiButton({ context, suggestions = [], label = "问 AI" }: Pro
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const sessionId = useRef(randomId());
   // 在跑的流式请求：关面板/换问题时中止，省用户的订阅/API 额度，也防迟到 chunk 写进新气泡
   const abortRef = useRef<AbortController | null>(null);
 
@@ -78,6 +83,7 @@ export function AskAiButton({ context, suggestions = [], label = "问 AI" }: Pro
     const alive = () => abortRef.current === ac && !ac.signal.aborted;
     try {
       await chatStream(history, context, {
+        sessionId:sessionId.current,
         onTool: (tool, args) => { if (alive()) patchLast((msg) => ({ ...msg, tools: [...(msg.tools || []), { name: tool, arg: argStr(args) }] })); },
         onDelta: (t) => { if (alive()) patchLast((msg) => ({ ...msg, content: msg.content + t })); },
       }, ac.signal);
@@ -139,7 +145,7 @@ export function AskAiButton({ context, suggestions = [], label = "问 AI" }: Pro
                 <div ref={scrollRef} className="flex-1 space-y-3 overflow-auto p-4 text-sm">
                   {msgs.length === 0 && (
                     <div className="rounded-lg border border-warning/30 bg-warning/5 p-3 text-xs text-muted-foreground">
-                      AI 可基于本页上下文、并自行调取 A股行情/估值/研报数据作答。结论由你的模型给出，
+                      {readMode() ? "本次结合本页资料，可查询公开行情、估值和研报。" : "本次仅阅读本页已提供资料；开启左侧 Agent 后才可查询更多公开资料。"}结论由你的模型给出，
                       <b className="text-foreground">不构成投资建议</b>。
                     </div>
                   )}
@@ -159,7 +165,7 @@ export function AskAiButton({ context, suggestions = [], label = "问 AI" }: Pro
                             ))}
                           </div>
                         )}
-                        <p className="whitespace-pre-wrap">{m.content}</p>
+                        <div className="prose prose-sm max-w-none dark:prose-invert"><ReactMarkdown remarkPlugins={[remarkGfm]}>{m.content}</ReactMarkdown></div>
                         {m.role === "assistant" && m.content && !(loading && i === msgs.length - 1) && (
                           <div className="mt-1.5"><SaveNoteButton kind="问AI" title={`问 AI · ${msgs[i - 1]?.content?.slice(0, 24) || "对话"}`} content={m.content} /></div>
                         )}
@@ -168,7 +174,7 @@ export function AskAiButton({ context, suggestions = [], label = "问 AI" }: Pro
                   ))}
                   {loading && (
                     <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                      <Loader2 className="h-3.5 w-3.5 animate-spin" /> AI 正在思考 / 调取数据…
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" /> {readMode() ? "正在分析，实际查询记录会显示在回答上方…" : "正在阅读本页资料并整理回答…"}
                     </div>
                   )}
                   {err && (
@@ -192,7 +198,7 @@ export function AskAiButton({ context, suggestions = [], label = "问 AI" }: Pro
                     <textarea
                       value={input}
                       onChange={(e) => setInput(e.target.value)}
-                      onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(input); } }}
+                      onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing && e.keyCode !== 229) { e.preventDefault(); send(input); } }}
                       rows={1}
                       placeholder="就本页内容提问…"
                       className="flex-1 resize-none rounded-lg border border-border bg-black/20 px-3 py-2 text-sm outline-none focus:border-primary/50"

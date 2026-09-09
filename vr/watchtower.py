@@ -1,12 +1,13 @@
 """每日盯盘数据层 —— 盘中 3 秒轮询的实时监控（短线投资实例专属，不回推开源仓库）。
 
 五个模块的标的池：持仓股（后端可读）/ 自选股（前端传入）/ 总市值≥500亿大票（东财市值榜，
-每日一次）/ 三连板以上（东财涨停池，60 秒刷新）/ 昨日成交额前十（收盘快照，次日复用）。
+每日一次）/ 前一交易日涨停梯队（固定全样本，附原板数）/ 昨日成交额前十。
+持仓统一读交易日志；昨日梯队按行情场次和真实交易日历确定，缺口显式返回。
 
 架构：常驻轮询线程只在交易时段活跃 —— 每 3 秒用腾讯批量行情（qt.gtimg.cn，L1 快照 3 秒
 一帧、不封 IP、60 只/请求）拉全池，内存帧差分做异动检测（急拉急跌/触板开板，冷却去重），
 异动事件当日落盘复盘。前端每 3 秒读内存快照（零上游请求，毫秒级响应）。
-（v2 候选：mootdx TCP 主通道、量能脉冲规则、macOS 弹窗通知。）
+异动仅供用户在页面内主动查看，不提供系统通知、到价提醒或后台推送。
 """
 
 from __future__ import annotations
@@ -23,11 +24,12 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import astock
+from vr import previous_ladder
 
 BEIJING = timezone(timedelta(hours=8))
 UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"
 
-_DATA_DIR = Path(os.environ.get("VR_DATA_DIR") or Path.home() / ".vibe-research") / "monitor"
+_DATA_DIR = Path(os.environ.get("VR_DATA_DIR") or Path.home() / ".vibe-astock-agent/market-data") / "monitor"
 
 POLL_SECONDS = 3          # L1 快照 3 秒一帧（沪深两所官方口径），更快无意义
 SURGE_WINDOW = 180        # 急拉急跌观察窗（秒）
@@ -45,8 +47,10 @@ _alerts: list[dict] = []          # 当日异动事件（新的在前）
 _alert_last: dict[tuple, float] = {}
 _snapshot: dict = {}              # 前端直接读的最新快照
 _bigcaps_cache: tuple[str, list] | None = None   # (date, [{code,name}])
-_lianban_cache: tuple[float, list] = (0.0, [])
 _turnover_saved_date = ""
+_previous_cache: tuple[float, str, dict] = (0.0, "", {})
+_previous_lock = threading.Lock()
+_previous_worker: threading.Thread | None = None
 
 
 # ---------------------------------------------------------------- 腾讯批量行情
@@ -75,11 +79,13 @@ def _tencent_batch(codes: list[str]) -> dict[str, dict]:
             if not m:
                 continue
             code, f = m.group(1), m.group(2).split("~")
-            if len(f) < 49 or not f[3]:
+            if len(f) < 49 or not f[3] or not f[32]:
                 continue
             try:
                 out[code] = {
                     "name": f[1],
+                    "quote_time": f[30],
+                    "high": float(f[33]) if f[33] else None,
                     "price": float(f[3]),
                     "prev_close": float(f[4] or 0),
                     "pct": float(f[32] or 0),
@@ -94,12 +100,9 @@ def _tencent_batch(codes: list[str]) -> dict[str, dict]:
 
 # ---------------------------------------------------------------- 标的池
 def _holdings() -> list[dict]:
-    try:
-        import portfolio as pf
-
-        return pf._load().get("holdings", [])
-    except Exception:  # noqa: BLE001
-        return []
+    # The journal is the same authority used by /api/positions and My Stocks.
+    from duanxian.positions import open_positions
+    return open_positions()
 
 
 def _bigcaps() -> list[dict]:
@@ -146,27 +149,6 @@ def _bigcaps() -> list[dict]:
         return saved["stocks"]
     except Exception:  # noqa: BLE001
         return []
-
-
-def _lianban3() -> list[dict]:
-    """三连板以上名单（东财涨停池，盘中 60 秒刷新一次，附连板数）。"""
-    global _lianban_cache
-    if time.time() - _lianban_cache[0] < 60:
-        return _lianban_cache[1]
-    today = datetime.now(BEIJING).date()
-    stocks: list[dict] = []
-    for back in range(8):
-        d = (today - timedelta(days=back)).strftime("%Y%m%d")
-        pool = astock.em_zt_topic_pool("getTopicZTPool", d, "fbt:asc")
-        if pool:
-            stocks = [
-                {"code": str(p.get("c", "")), "name": p.get("n", ""), "boards": int(p.get("lbc") or 1)}
-                for p in pool
-                if int(p.get("lbc") or 1) >= 3
-            ]
-            break
-    _lianban_cache = (time.time(), sorted(stocks, key=lambda x: -x["boards"]))
-    return _lianban_cache[1]
 
 
 def _turnover_file() -> Path:
@@ -216,22 +198,13 @@ def _save_turnover_snapshot() -> None:
 
 # ---------------------------------------------------------------- 交易时段
 def _market_phase() -> str:
-    """'open' 交易中 / 'break' 午休 / 'closed' 收盘或非交易日。（节假日不特判：池自然无变化）"""
-    now = datetime.now(BEIJING)
-    if now.weekday() >= 5:
-        return "closed"
-    hm = now.hour * 100 + now.minute
-    if 915 <= hm <= 1132:
-        return "open"
-    if 1132 < hm < 1258:
-        return "break"
-    if 1258 <= hm <= 1505:
-        return "open"
-    return "closed"
+    """只有连续交易时段启用盘中异动检测。"""
+    from duanxian import trade_calendar
+    return trade_calendar.session_phase(datetime.now(BEIJING), trade_calendar.quote_trade_day())["phase_key"]
 
 
 # ---------------------------------------------------------------- 异动检测
-def _emit(code: str, name: str, kind: str, msg: str, sources: list[str]) -> None:
+def _emit(code: str, name: str, kind: str, msg: str, sources: list[str], change_pct: float | None = None) -> None:
     key = (code, kind)
     now = time.time()
     if now - _alert_last.get(key, 0) < ALERT_COOLDOWN:
@@ -241,7 +214,7 @@ def _emit(code: str, name: str, kind: str, msg: str, sources: list[str]) -> None
         "ts": datetime.now(BEIJING).strftime("%H:%M:%S"),
         "code": code,
         "name": name,
-        "kind": kind,
+        "kind": kind, "change_pct": change_pct,
         "msg": msg,
         "sources": sources,
     }
@@ -266,9 +239,9 @@ def _detect(code: str, q: dict, sources: list[str]) -> None:
     if old and old[1] > 0 and now - old[0] >= 60:  # 至少积累 1 分钟才判
         delta = (q["price"] / old[1] - 1) * 100
         if delta >= SURGE_PCT:
-            _emit(code, q["name"], "急拉", f"3分钟 +{delta:.1f}%（现价 {q['price']}，今日 {q['pct']:+.1f}%）", sources)
+            _emit(code, q["name"], "急拉", f"3分钟 +{delta:.1f}%（现价 {q['price']}，今日 {q['pct']:+.1f}%）", sources, delta)
         elif delta <= -SURGE_PCT:
-            _emit(code, q["name"], "急跌", f"3分钟 {delta:.1f}%（现价 {q['price']}，今日 {q['pct']:+.1f}%）", sources)
+            _emit(code, q["name"], "急跌", f"3分钟 {delta:.1f}%（现价 {q['price']}，今日 {q['pct']:+.1f}%）", sources, delta)
 
     # 规则② 触板/开板（涨停价来自行情快照，含北交所 30cm）
     if q["zt_price"] > 0:
@@ -285,7 +258,7 @@ def _detect(code: str, q: dict, sources: list[str]) -> None:
 # ---------------------------------------------------------------- 主循环
 def _build_snapshot(quotes: dict, holdings: list[dict], watch: list[str],
                     bigcaps: list[dict], lianban: list[dict],
-                    turnover_label: str, turnover: list[dict], phase: str) -> dict:
+                    turnover_label: str, turnover: list[dict], phase: str, cohort: dict | None = None, holdings_error: str = "") -> dict:
     def row(code: str) -> dict:
         q = quotes.get(code) or {}
         return {
@@ -310,7 +283,9 @@ def _build_snapshot(quotes: dict, holdings: list[dict], watch: list[str],
         r = row(s["code"])
         r["boards"] = s["boards"]
         q = quotes.get(s["code"]) or {}
-        if q.get("zt_price") and q.get("price") is not None:
+        stamp = str(q.get("quote_time") or "")
+        fresh = len(stamp) == 14 and stamp.startswith(datetime.now(BEIJING).strftime("%Y%m%d"))
+        if fresh and phase not in {"auction", "closing", "unknown"} and q.get("zt_price") and q.get("price") is not None:
             r["is_limit"] = q["price"] >= q["zt_price"] - 1e-6
         lianban_rows.append(r)
 
@@ -324,28 +299,86 @@ def _build_snapshot(quotes: dict, holdings: list[dict], watch: list[str],
         "phase": phase,
         "poll_seconds": POLL_SECONDS,
         "holdings": hold_rows,
+        "holdings_error": holdings_error,
         "watchlist": [row(c) for c in watch],
         "bigcap": {"total": len(bigcaps), "top": bigcap_rows},
         "lianban3": lianban_rows,
+        "yesterday_ladder": previous_ladder.render_cohort(cohort or {}, quotes, phase=phase),
         "turnover": {"label": turnover_label, "stocks": [row(t["code"]) for t in turnover]},
         "alerts": _alerts[:120],
     }
 
 
+def _refresh_previous_cohort(wall_day: str) -> None:
+    global _previous_cache
+    quote_day = None
+    try:
+        quote_day = previous_ladder.trade_calendar.quote_trade_day()
+        result = previous_ladder.load_cohort(quote_day)
+    except Exception:
+        result = {"available": False, "quote_date": quote_day, "sample_date": None,
+                  "stocks": [], "reason": "昨日梯队后台刷新失败，请稍后重试"}
+    with _previous_lock:
+        previous = _previous_cache[2]
+        if (not result.get("available") and quote_day
+                and _previous_cache[1] == wall_day and previous.get("available")
+                and previous.get("quote_date") == quote_day):
+            result = {**previous, "warning": "昨日名单刷新失败，保留同一行情交易日已确认的样本；行情仍独立更新。"}
+        _previous_cache = (time.monotonic(), wall_day, result)
+    _wake.set()
+
+
+def _previous_cohort() -> dict:
+    """Never wait for calendar/pool I/O in the quote loop. At most one worker.
+
+    A hung upstream can delay this card, but cannot block quote polling or spawn
+    unbounded retries. Existing samples remain explicitly dated while refreshing.
+    """
+    global _previous_worker
+    wall_day = datetime.now(BEIJING).strftime("%Y-%m-%d")
+    with _previous_lock:
+        stamp, cache_day, result = _previous_cache
+        current = cache_day == wall_day
+        if current and time.monotonic() - stamp < 120:
+            return result
+        if _previous_worker is None or not _previous_worker.is_alive():
+            _previous_worker = threading.Thread(target=_refresh_previous_cohort,
+                                                args=(wall_day,), name="yesterday-cohort", daemon=True)
+            _previous_worker.start()
+        if current and result.get("available"):
+            return {**result, "warning": "昨日名单正在后台刷新，暂保留下方所示日期的样本；行情独立更新。"}
+        return {"available": False, "quote_date": None, "sample_date": None, "stocks": [],
+                "reason": "正在后台确认昨日梯队；其他盯盘行情正常刷新。"}
+
+
 def _loop() -> None:
     global _snapshot
+    alert_day = None
     while True:
+        _expire_watch_clients()
         phase = _market_phase()
-        if phase == "closed":
-            _save_turnover_snapshot()
+        today = datetime.now(BEIJING).strftime("%Y%m%d")
+        if today != alert_day:
+            _alerts.clear(); _frames.clear(); _limit_state.clear()
+            alert_day = today
+        if phase == "closed" and datetime.now(BEIJING).strftime("%H:%M") >= "15:05":
+            from duanxian.trade_calendar import quote_trade_day
+            if quote_trade_day() == datetime.now(BEIJING).strftime("%Y-%m-%d"):
+                _save_turnover_snapshot()
 
         # 非交易时段也低频全量重建（收盘后录入持仓/加自选立刻可见），只是不做异动检测
         try:
-            holdings = _holdings()
+            holdings_error = ""
+            try:
+                holdings = _holdings()
+            except Exception:
+                holdings = []
+                holdings_error = "持仓读取失败，未展示旧账替代数据；请在我的股票检查交易日志。"
             with _lock:
                 watch = list(_extra_watch)
             bigcaps = _bigcaps()
-            lianban = _lianban3()
+            cohort = _previous_cohort()
+            lianban = [s for s in cohort.get("stocks", []) if s["boards"] >= 3]
             turnover_label, turnover = _turnover_yesterday()
 
             pool: dict[str, list[str]] = {}
@@ -355,17 +388,25 @@ def _loop() -> None:
                 pool.setdefault(c, []).append("自选")
             for b in bigcaps:
                 pool.setdefault(b["code"], []).append("大票")
-            for s in lianban:
-                pool.setdefault(s["code"], []).append("连板")
+            for s in cohort.get("stocks", []):
+                pool.setdefault(s["code"], []).append(f"昨日{s['boards']}板")
             for t in turnover:
                 pool.setdefault(t["code"], []).append("昨十")
 
             quotes = _tencent_batch(list(pool.keys()))
             if phase == "open":
+                stamp_day = datetime.now(BEIJING).strftime("%Y%m%d")
                 for code, q in quotes.items():
-                    _detect(code, q, pool[code])
+                    stamp = str(q.get("quote_time") or "")
+                    earliest = "1300" if datetime.now(BEIJING).hour >= 13 else "0930"
+                    if len(stamp) == 14 and stamp.startswith(stamp_day) and stamp[8:12] >= earliest:
+                        _detect(code, q, pool[code])
+            else:
+                # 竞价/午休的报价不进入连续交易的急拉与开板比较基准。
+                _frames.clear()
+                _limit_state.clear()
             _snapshot = _build_snapshot(quotes, holdings, watch, bigcaps, lianban,
-                                        turnover_label, turnover, phase)
+                                        turnover_label, turnover, phase, cohort, holdings_error)
         except Exception:  # noqa: BLE001  数据源抖动不杀线程，下一轮重试
             pass
         _wake.wait(POLL_SECONDS if phase == "open" else 20)
@@ -384,17 +425,41 @@ def poke() -> None:
     _wake.set()
 
 
-def set_watch(codes: list[str]) -> None:
+_watch_clients: dict[str, tuple[float, list[str]]] = {}
+
+def set_client_watch(client_id: str, codes: list[str]) -> None:
     global _extra_watch
-    clean = [c for c in codes if re.match(r"^\d{6}$", c)][:100]
+    if not isinstance(client_id, str) or not re.fullmatch(r"[a-f0-9]{32}", client_id):
+        raise ValueError("监控客户端编号无效")
+    if not isinstance(codes, list) or len(codes) > 100 or any(not isinstance(c, str) or not re.fullmatch(r"\d{6}", c) for c in codes):
+        raise ValueError("自选最多100只，代码须为6位数字")
+    _expire_watch_clients()
     with _lock:
+        now = time.monotonic()
+        if client_id not in _watch_clients and len(_watch_clients) >= 32:
+            raise ValueError("同时监控页面过多，请关闭不用的页面")
+        candidate = {**_watch_clients, client_id: (now, list(dict.fromkeys(codes)))}
+        clean = list(dict.fromkeys(c for _, group in candidate.values() for c in group))
+        if len(clean) > 300:
+            raise ValueError("全部监控页面合计最多300只，请关闭不用的页面或缩减自选")
+        _watch_clients[client_id] = candidate[client_id]
         changed = clean != _extra_watch
         _extra_watch = clean
     if changed:
         poke()
 
 
+def _expire_watch_clients() -> None:
+    global _extra_watch
+    with _lock:
+        expired = [key for key, (stamp, _) in _watch_clients.items() if time.monotonic() - stamp > 120]
+        if expired:
+            for key in expired:
+                del _watch_clients[key]
+            _extra_watch = list(dict.fromkeys(c for _, group in _watch_clients.values() for c in group))
+
+
 def get_snapshot() -> dict:
-    return _snapshot or {"ts": "", "phase": _market_phase(), "poll_seconds": POLL_SECONDS,
+    return _snapshot or {"warming_up": True, "ts": "", "phase": _market_phase(), "poll_seconds": POLL_SECONDS,
                          "holdings": [], "watchlist": [], "bigcap": {"total": 0, "top": []},
                          "lianban3": [], "turnover": {"label": "", "stocks": []}, "alerts": []}

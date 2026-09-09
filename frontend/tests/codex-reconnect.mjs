@@ -2,77 +2,51 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import ts from 'typescript';
-
-// Exercise the actual Settings component across device-login polling renders.
-let cursor = 0, dirty = false, tree, interval;
-const cells = [], effects = [];
-const react = {
-  useState(initial) {
-    const i = cursor++;
-    if (!(i in cells)) cells[i] = typeof initial === 'function' ? initial() : initial;
-    return [cells[i], next => { const value = typeof next === 'function' ? next(cells[i]) : next; if (!Object.is(value, cells[i])) { cells[i] = value; dirty = true; } }];
-  },
-  useRef(initial) { return react.useState(() => ({ current: initial }))[0]; },
-  useEffect(fn, deps) {
-    const i = cursor++, old = cells[i];
-    if (!old || deps.some((v, n) => !Object.is(v, old.deps[n]))) {
-      cells[i] = { deps }; effects.push(() => { old?.cleanup?.(); cells[i].cleanup = fn(); });
-    }
-  },
+let cursor=0, dirty=false, tree, timer, saved, saveFails=true;
+const cells=[], effects=[], session=new Map();
+const react={
+ useState(initial){const i=cursor++;if(!(i in cells))cells[i]=typeof initial==='function'?initial():initial;return [cells[i],next=>{const v=typeof next==='function'?next(cells[i]):next;if(!Object.is(v,cells[i])){cells[i]=v;dirty=true;}}];},
+ useRef(initial){return react.useState(()=>({current:initial}))[0];},
+ useId(){return 'model-list';},
+ useEffect(fn,deps){const i=cursor++,old=cells[i];if(!old||deps.some((v,n)=>!Object.is(v,old.deps[n]))){cells[i]={deps};effects.push(()=>{old?.cleanup?.();cells[i].cleanup=fn();});}},
 };
-const jsx = (type, props) => ({ type, props: props || {} });
-let status = { kind: 'codex', allowed: true, installed: true, authenticated: false, status: 'logged_out' };
-let saved;
-const codex = { id: 'codex', provider: 'cli-codex', name: 'Codex' };
-const api = { id: 'custom', provider: 'openai-compatible' };
-const models = {
-  subscriptionModels: [codex], apiModels: [api], aiModels: [codex, api], PROVIDER_BASE: {},
-  isCliProvider: p => p.startsWith('cli-'), cliKindOf: p => p.slice(4),
-  cliAvailability: () => ({ clis: [status] }), cliAvailState: () => 'ready',
-  primeCliAvailability: async () => ({ clis: [status] }),
-  startCodexDeviceAuth: async () => { status = { ...status, status: 'login_pending' }; },
-};
-const modules = {
-  react, 'react/jsx-runtime': { jsx, jsxs: jsx },
-  'lucide-react': new Proxy({}, { get: (_, key) => String(key) }),
-  '@/lib/account': { sharedWebsite: true },
-  '@/lib/llm': { loadLlm: () => saved || null, staleBlockedProvider: () => null, saveLlm: async value => { saved = value; } },
-  '@/lib/api': { authHeaders: () => ({}), loadAccessKey: () => '' },
-  '@/lib/ai-models': models,
-  sonner: { toast: { success() {}, error(message) { throw new Error(message); } } },
-};
-const exports = {};
-vm.runInNewContext(ts.transpileModule(readFileSync(new URL('../src/pages/Settings.tsx', import.meta.url), 'utf8'), {
-  compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX },
-}).outputText, { exports, require: name => modules[name] || new Proxy({}, { get: (_, key) => String(key) }),
-  window: { setInterval: fn => { interval = fn; return 1; }, clearInterval: () => { interval = null; } },
-});
-const nodes = node => !node || typeof node !== 'object' ? [] : Array.isArray(node)
-  ? node.flatMap(nodes) : [node, ...nodes(node.props?.children)];
-const textOf = node => !node || typeof node === 'boolean' ? '' : typeof node !== 'object' ? String(node)
-  : Array.isArray(node) ? node.map(textOf).join('') : textOf(node.props?.children);
-async function render() {
-  for (let n = 0; n < 20; n++) {
-    dirty = false; cursor = 0; tree = exports.Settings();
-    effects.splice(0).forEach(fn => fn()); await new Promise(resolve => setImmediate(resolve));
-    if (!dirty) return;
-  }
-  throw new Error('Settings render did not settle');
+const jsx=(type,props)=>({type,props:props||{}});
+function compile(file,modules,extra={}){
+ const ctx={exports:{},require:name=>modules[name]||{},...extra};
+ vm.runInNewContext(ts.transpileModule(readFileSync(new URL(file,import.meta.url),'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.ReactJSX,target:ts.ScriptTarget.ES2022}}).outputText,ctx);
+ return ctx.exports;
 }
-await render();
-nodes(tree).find(n => n.props.onClick && textOf(n).startsWith('订阅接入')).props.onClick();
-await render();
-await nodes(tree).find(n => n.type === 'button' && textOf(n) === '登录 Codex').props.onClick();
-await render();
-assert.ok(interval, 'Device authorization must be polled');
-status = { ...status, authenticated: true, status: 'ready', models: ['model-a', 'model-b'], model: 'model-a' };
-await interval(); await render();
-const picker = nodes(tree).find(n => n.type === 'select' && n.props.id === 'codex-model');
-assert.ok(picker, 'After reconnect, model selection must appear without clicking Codex again');
-assert.ok(nodes(tree).some(n => n.type === 'dialog'), 'Successful reconnect must open model selection');
-picker.props.onChange({ target: { value: 'model-b' } }); await render();
-await nodes(tree).find(n => n.type === 'button' && textOf(n) === '保存并完成连接').props.onClick();
-await render();
-assert.equal(saved.provider, 'cli-codex'); assert.equal(saved.model, 'model-b');
-assert.ok(!nodes(tree).some(n => n.type === 'dialog'), 'Save closes model selection');
-console.log('Codex reconnect → model selection → personal configuration save passed.');
+const choices=compile('../src/lib/ai-access.ts',{});
+let job={status:'idle'}, logged=false;
+const api={
+ loadAgentConnection:()=>null,
+ saveAgentConnection:async c=>{if(saveFails)throw Error('offline');saved=c;},
+ AgentRequestError:Error,
+ agentRequest:async(path,body)=>{
+  if(path==='/status')return {subscription_ready:logged,models:logged?[{model:'model-a'},{model:'model-b'}]:[],default_model:logged?'model-a':''};
+  if(path==='/access')return job;
+  if(path==='/access/login')return job={id:'login',kind:'login',status:'running',auth_url:'https://auth.openai.com/'};
+  if(path==='/access/probe')return job={id:body.request_id,kind:'probe',status:'running'};
+  throw Error(path);
+ }
+};
+const component=compile('../src/components/AgentAccess.tsx',{
+ react,'react/jsx-runtime':{jsx,jsxs:jsx},'@/lib/ai-access':choices,'@/lib/agent-api':api,
+ '@/lib/random-id':{randomId:()=> 'a'.repeat(32)},'@/lib/account':{accountKey:k=>k+':account:alice'},
+},{AbortController,setTimeout:fn=>{timer=fn;return 1;},clearTimeout(){},sessionStorage:{getItem:k=>session.get(k)||null,setItem:(k,v)=>session.set(k,v),removeItem:k=>session.delete(k)}});
+const nodes=n=>!n||typeof n!=='object'?[]:Array.isArray(n)?n.flatMap(nodes):[n,...nodes(n.props?.children)];
+const text=n=>!n||typeof n==='boolean'?'':typeof n!=='object'?String(n):Array.isArray(n)?n.map(text).join(''):text(n.props?.children);
+async function render(){for(let n=0;n<30;n++){dirty=false;cursor=0;tree=component.AgentAccess({});effects.splice(0).forEach(f=>f());await new Promise(r=>setImmediate(r));if(!dirty)return;}throw Error('render loop');}
+const button=label=>nodes(tree).find(n=>n.type==='button'&&text(n)===label);
+await render();assert.equal(button('测试连接并保存').props.disabled,true);
+await button('登录 ChatGPT').props.onClick();await render();
+logged=true;job={id:'login',kind:'login',status:'complete'};await timer();await render();
+const model=nodes(tree).find(n=>n.props['aria-label']==='Agent 接入模型');
+assert.equal(model.props.value,'model-a');model.props.onChange({target:{value:'model-b'}});await render();
+await button('测试连接并保存').props.onClick();await render();
+assert.ok([...session.keys()].every(k=>k.endsWith(':account:alice')));
+job={...job,status:'complete'};await timer();await render();
+assert.equal(saved,undefined);assert.equal(session.size,1,'Failed persistence keeps the recoverable tested configuration');
+saveFails=false;await timer();await render();
+assert.equal(saved.provider,'codex-private');assert.equal(saved.model,'model-b');assert.equal(session.size,0);
+console.log('Unified Codex login → model selection → probe → recoverable account save passed.');

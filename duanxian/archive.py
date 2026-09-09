@@ -172,7 +172,8 @@ def field_drift(slug: str, limit: int = 60) -> dict:
         "changed": changed,
         # 检不出漂移 ≠ 没有漂移，这两件事必须分得开
         "detectable": raw_days >= 2,
-        "note": note,
+        "note": note + (f"；仅覆盖 {ds[0]} 至 {ds[-1]}，不能证明之后的源结构稳定" if ds else ""),
+        "date_from": ds[0] if ds else None, "date_to": ds[-1] if ds else None,
     }
 
 
@@ -215,8 +216,8 @@ _SLUG_SOURCES = {
 def capture_day(date: Optional[str] = None) -> dict:
     """把某个交易日的原始数据整套归档。复盘跑完调用。
 
-    ⚠️ 用的都是**已经取过的**数据（三池走 market_facts 缓存、prev_pool 走 backtest
-    缓存、题材串走 theme_tree 缓存），所以这一步**不额外发网络请求**。
+    优先复用三池、昨日池与题材缓存；缓存缺失或过期时会重取公开数据。
+    实际抓取时点写入元数据，归档不回填为原报告证据。
     """
     from . import market_facts as mf
     from . import theme_tree as tt
@@ -253,3 +254,13 @@ def capture_day(date: Optional[str] = None) -> dict:
     ok = any(r.get("ok") for r in results.values())
     return {"ok": ok, "date": date,
             "archived": {k: v.get("rows") or v.get("reason") for k, v in results.items()}}
+
+
+def coverage_status(date_to: str | None, expected_date: str | None) -> dict:
+    """Latest-day coverage is separate from continuity of the stored history."""
+    stale = bool(expected_date and (not date_to or date_to < expected_date))
+    return {"last_archived_session": date_to, "expected_session": expected_date,
+            "stale": stale, "coverage_note":
+            (f"归档仅到 {date_to or '尚无记录'}，落后于最近已收盘场次 {expected_date}；不能据此判断当前字段或市场结构稳定" if stale else
+             "当前归档截止日已覆盖最近已收盘场次；不代表中间每个交易日均有记录" if expected_date else
+             "最近已收盘场次未核实；归档日期仅表示已有记录范围")}

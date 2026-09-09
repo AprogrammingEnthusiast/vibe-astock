@@ -16,24 +16,27 @@ const dateLabel = (d: string) =>
 export function FirstBoard() {
   const [data, setData] = useState<FirstBoardData | null>(null);
   const [loaded, setLoaded] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const dd = useDeepDive("firstboard", data?.date || "");
 
   useEffect(() => {
-    api.firstBoard().then(setData).catch(() => {}).finally(() => setLoaded(true));
+    api.firstBoard().then(setData).catch((error: unknown) => {
+      setLoadError(error instanceof Error ? error.message : "首板名单读取失败，请刷新重试");
+    }).finally(() => setLoaded(true));
   }, []);
 
   const buildPrompt = (s: FirstBoardStock) =>
-    `今天（${dateLabel(data?.date || "")}）A 股首板涨停股「${s.name}（${s.code}）」的客观数据：\n` +
+    `交易日（${dateLabel(data?.date || "")}）A 股首板涨停股「${s.name}（${s.code}）」的客观数据：\n` +
     `现价 ${s.price} 元，涨停 +${s.pct}%，首次封板时间 ${s.seal_time || "未知"}，` +
     `炸板 ${s.break_count} 次，成交额 ${yi(s.amount)}，流通市值 ${yi(s.float_cap)}，` +
     `所属行业 ${s.industry || "未知"}，涨停原因题材：${s.reason || "（暂缺，需要自查）"}。\n\n` +
-    "请深入分析这只股票今天涨停的原因：\n" +
-    "1. 先调用工具查询这只股票的近期新闻与研报，结合上面的题材串，说清今天涨停最可能的驱动因素（消息面 / 题材面 / 资金面）；\n" +
-    "2. 就**这个题材板块整体**说清它的强度与所处阶段（情绪性的一日游 / 有产业逻辑或业绩支撑），" +
-    "并给出依据 —— 只讲题材板块层面，不要由此推断这只个股接下来会怎样；\n" +
-    "3. 客观列出值得注意的点（炸板情况、封板时间早晚、流通盘大小、题材扩散位置）。\n" +
-    "个股层面只陈述已经发生的客观数据与事实，方向与强弱判断做到题材板块层面为止：" +
-    "不预测个股涨跌、不给个股参与倾向、不推荐任何标的、不构成投资建议。" +
+    "请深入分析这只股票在该交易日涨停的原因：\n" +
+    "1. 若本次允许工具，查询该交易日及之前的新闻研报；未开启工具则仅依据给定资料并明确新闻研报尚未核实。结合题材串说明可能驱动，源站归因不是公司确认事实，不得用之后的新闻倒推当天原因；\n" +
+    "2. 材料只有单股数据，不能据此判定整个题材板块强度、阶段、扩散或持续性。缺少同日板块广度、梯队和历史对照时写「板块证据不足」，不要猜测情绪性一日游或产业趋势；\n" +
+    "3. 按「已知事实」「尚未核实」「后续核验条件」三段，每段最多三条，全文约300字。首次封板09:25属于开盘集合竞价，不能称连续竞价中的早盘承接；炸板0次仅说明数据源未记录开板，不证明买盘强弱或持续性。流通市值只报原值，缺少横截面比较不能自定大中小盘。\n" +
+    "后续核验条件只写需要补查的公开资料和可观察变化，不写交易动作、个股参与倾向、点位、仓位或价格预测，也不要复述被禁止的词语。" +
+    "不要展示工具开关、参数名、allow_tools、JSON等实现细节；没有查到新闻研报就直接说「新闻研报尚未核实」。" +
+    "个股层面只陈述已经发生的客观数据与事实；方向与强弱判断做到题材板块层面为止，且必须有这个题材板块整体的证据；不要由此推断这只个股接下来会怎样。不预测个股涨跌，不给个股参与倾向，不推荐任何标的，不构成投资建议。这是约束，不必在答案中复述。" +
     "输出用纯 Markdown（不要在表格或正文里使用 <br> 等 HTML 标签）。";
 
   const ctx = (s: FirstBoardStock) => `首板股 ${s.name}(${s.code}) 涨停原因深入分析`;
@@ -46,14 +49,14 @@ export function FirstBoard() {
     <div>
       <PageHeader
         title="首板分析"
-        subtitle="今日首板涨停股（连板数=1）· 涨停原因题材 · 每只可让 AI 深入分析"
+        subtitle="按下方交易日展示首板涨停股（连板数=1）· 涨停原因题材 · 每只可让 AI 深入分析"
       />
 
       {data && (
         <div className="mb-4 grid grid-cols-3 gap-3">
           {[
             { label: "交易日", value: dateLabel(data.date) },
-            { label: "今日涨停", value: `${data.total_zt} 家` },
+            { label: "该交易日涨停", value: `${data.total_zt} 家` },
             { label: "其中首板", value: `${data.first_count} 家` },
           ].map((c) => (
             <GlassCard key={c.label} className="py-3 text-center">
@@ -74,8 +77,8 @@ export function FirstBoard() {
         <div className="mb-2 flex flex-wrap items-center gap-2 text-sm font-semibold">
           <Flame className="h-4 w-4 text-primary" /> 首板名单
           <Caliber text={
-            "「炸板」是当天开板过几次，0 就是全天没开过板 —— 这张表里的票**最终都封住了涨停**，\n" +
-            "所以炸板次数说的是过程有多难看，不是最后有没有封住。\n" +
+            "「炸板」为数据源记录的当日开板次数；0 表示未记录开板，不证明买盘强弱或持续性。\n" +
+            "榜单是取数时点仍涨停的股票，盘中还可能变化；收盘后才可作为最终涨停名单。\n" +
             "名单按首次封板时间从早到晚排。\n" +
             "「行业」经常只有四个字（像「互联网电」「自动化设」）——是上游把名字截到四字，\n" +
             "不是这里显示不全；怕猜错所以不替它补全称。"
@@ -91,6 +94,8 @@ export function FirstBoard() {
           <div className="flex items-center gap-2 py-8 text-sm text-muted-foreground">
             <Loader2 className="h-4 w-4 animate-spin" /> 加载中…
           </div>
+        ) : loadError ? (
+          <p role="alert" className="py-8 text-center text-sm text-danger">首板名单读取失败：{loadError}。请刷新页面重试。</p>
         ) : stocks.length === 0 ? (
           <div className="py-8 text-center text-sm text-muted-foreground">暂无数据（数据源异常或非交易日）</div>
         ) : (

@@ -5,11 +5,12 @@
         → push2delay.eastmoney.com 的 clist 接口
         （push2.eastmoney.com 在部分网络下被重置，故用 delay 镜像）
   · 涨停池 / 炸板池 / 强势股池 / 龙虎榜 / 情绪总览 → akshare 原生
-  · 涨停原因题材串 → 同花顺问财（**需要 IWENCAI_API_KEY**，没有就跳过这一路，
-        复盘照常出，只是题材树不可用）
+  · 涨停原因题材串 → 同花顺问财增强源；未配置密钥时走公开涨停揭秘（逐行核对封板日期）
   · 5 日 / 10 日累计净额由 clist 三窗口直取，不逐板块拉 daykline
         （push2his 历史接口在部分网络下被封，delay 镜像只给当日）
 """
+
+from .pool_source import frame as pool_frame
 
 import os
 import re
@@ -299,7 +300,7 @@ def fetch_zt_pool(date):
     import akshare as ak
     out = {"zt": None, "zb_count": 0, "dt_count": 0, "highest_consec": 0, "ladder": []}
     try:
-        zt = ak.stock_zt_pool_em(date=date)
+        zt = pool_frame("zt", date)
         out["zt"] = zt
         if "连板数" in zt.columns and len(zt):
             out["highest_consec"] = int(zt["连板数"].max())
@@ -316,12 +317,12 @@ def fetch_zt_pool(date):
     except Exception as e:
         out["error_zt"] = f"{type(e).__name__}: {str(e)[:100]}"
     try:
-        zb = ak.stock_zt_pool_zbgc_em(date=date)
+        zb = pool_frame("zb", date)
         out["zb_count"] = len(zb)
     except Exception as e:
         out["error_zb"] = f"{type(e).__name__}: {str(e)[:100]}"
     try:
-        dt = ak.stock_zt_pool_dtgc_em(date=date)
+        dt = pool_frame("dt", date)
         out["dt_count"] = len(dt)
     except Exception as e:
         out["error_dt"] = f"{type(e).__name__}: {str(e)[:100]}"
@@ -344,6 +345,12 @@ def fetch_zt_reasons(date):
     返回列名里带着问财实际给的日期（`涨停原因[YYYYMMDD]`），拿它和请求的日期对一遍：
     不一致就当取数失败，宁可没有题材串，也不能把别的交易日的题材塞进这一场。
     """
+    if not os.environ.get("IWENCAI_API_KEY"):
+        from .historical_sources import public_limit_reasons
+        try:
+            return public_limit_reasons(str(date))
+        except Exception as exc:
+            return {}, f"公开涨停原因源不可用：{exc}；可重试或配置问财增强源"
     try:
         IwencaiClient = _iwencai_client_cls()
     except Exception as e:
@@ -414,6 +421,15 @@ def fetch_lhb(date, top=15):
     try:
         df = ak.stock_lhb_detail_em(start_date=date, end_date=date)
         if len(df):
+            # The request date alone is not evidence: upstream has returned
+            # another session despite identical start/end parameters.
+            import datetime
+            expected = datetime.datetime.strptime(date, "%Y%m%d").date().isoformat()
+            if "上榜日" not in df.columns:
+                return [{"error": "龙虎榜缺少上榜日期，无法核实目标日"}]
+            days = df["上榜日"].map(lambda value: str(value)[:10])
+            if not days.eq(expected).all():
+                return [{"error": "龙虎榜返回日期与目标日不符，未使用该批数据"}]
             df = df.sort_values("龙虎榜净买额", ascending=False)
             # 机构净买: 该接口无独立机构净买列, 从「解读」推断不可靠 → 填 null
             for _, r in df.head(top).iterrows():

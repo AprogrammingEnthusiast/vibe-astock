@@ -1,10 +1,14 @@
 import { createBrowserRouter, Navigate } from "react-router-dom";
+import { StrategyBacktest } from "@/pages/StrategyBacktest";
+import { MyStocks } from "@/pages/MyStocks";
+import { Home } from "@/pages/Home";
 import { Layout } from "@/components/layout/Layout";
 import { SettingsLayout } from "@/components/layout/SettingsLayout";
 import { AgentReview } from "@/pages/AgentReview";
 import { DailyReview } from "@/pages/DailyReview";
 import { FirstBoard } from "@/pages/FirstBoard";
 import { AgentWeekly } from "@/pages/AgentWeekly";
+import { ResearchNotes } from "@/pages/ResearchNotes";
 import { Journal } from "@/pages/Journal";
 import { Backtest } from "@/pages/Backtest";
 import { DeepDive } from "@/pages/DeepDive";
@@ -22,14 +26,18 @@ export const router = createBrowserRouter([
   {
     element: <Layout />,
     children: [
-      { path: "/", element: <Navigate to="/agent/review" replace /> },
+      { path: "/", element: <Home /> },
       { path: "/agent/review", element: <AgentReview /> },
       { path: "/daily-review", element: <DailyReview /> },
       { path: "/first-board", element: <FirstBoard /> },
       { path: "/heat", element: <AgentWeekly /> },
       { path: "/journal", element: <Journal /> },
+      { path: "/notes", element: <ResearchNotes /> },
       { path: "/backtest", element: <Backtest /> },
       { path: "/watch", element: <DailyWatch /> },
+      { path: "/yesterday-ladder", element: <DailyWatch view="yesterday" /> },
+      { path: "/backtest-agent", element: <StrategyBacktest /> },
+      { path: "/my-stocks", element: <MyStocks /> },
       { path: "/portfolio", element: <Portfolio /> },
       { path: "/watchlist", element: <Watchlist /> },
       { path: "/stock-data", element: <StockData /> },
@@ -41,7 +49,7 @@ export const router = createBrowserRouter([
         { path: "members", element: <Members /> },
       ] },
       { path: "/members", element: <Navigate to="/settings/members" replace /> },
-      { path: "*", element: <Navigate to="/agent/review" replace /> },
+      { path: "*", element: <Navigate to="/" replace /> },
     ],
   },
 ], { basename: import.meta.env.BASE_URL });

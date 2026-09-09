@@ -43,7 +43,7 @@ while not Path(os.environ["TEST_CODEX_LOGIN_FINISH"]).exists():
     monkeypatch.setenv("TEST_CODEX_LOGIN_FINISH", str(finish))
     monkeypatch.setattr(server, "_ALLOWED_CLI_KINDS", frozenset({"claude", "codex"}))
     monkeypatch.setattr(server, "_codex_command", lambda: [sys.executable, str(fake)], raising=False)
-    client = TestClient(server.app)
+    client = TestClient(server.app, base_url="http://localhost")
 
     assert client.post(
         "/api/cli/codex/login", headers={"Origin": "https://evil.example"}

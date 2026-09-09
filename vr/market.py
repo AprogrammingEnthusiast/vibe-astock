@@ -182,11 +182,24 @@ def get_short_term_emotion() -> dict:
 def get_turnover_top() -> dict:
     """全市场成交额榜 Top20（客观公开榜单，含缓存 5 分钟）。"""
     def build():
+        import math
+        rows = astock.market_turnover_rank(20)
+        rows = [r for r in rows if isinstance(r.get("amount"), (int, float))
+                and math.isfinite(r["amount"]) and r["amount"] > 0]
+        rows.sort(key=lambda r: r["amount"], reverse=True)
         return {
-            "stocks": astock.market_turnover_rank(20),
+            "reason": ("" if quote_day == datetime.now(BEIJING).strftime("%Y-%m-%d") else f"参考行情日为 {quote_day}，请勿当作今日成交榜") if rows else "尚无有效成交额，暂不排名",
+            "quote_date": quote_day,
+            "stocks": rows,
             "updated": datetime.now(BEIJING).strftime("%Y-%m-%d %H:%M"),
         }
-    return _cached("turnover_top", build, valid=lambda v: bool(v.get("stocks")))
+    from duanxian import trade_calendar
+    quote_day = trade_calendar.quote_trade_day()
+    phase = trade_calendar.session_phase(datetime.now(BEIJING), quote_day)
+    if phase["phase_key"] in {"auction", "wait", "unknown"}:
+        return {"stocks": [], "updated": datetime.now(BEIJING).strftime("%Y-%m-%d %H:%M"),
+                "reason": "竞价阶段不展示连续交易成交额排行"}
+    return _cached("turnover_top:" + str(quote_day) + ":" + phase["phase_key"], build, valid=lambda v: bool(v.get("stocks")))
 
 
 def get_global_indices() -> list[dict]:

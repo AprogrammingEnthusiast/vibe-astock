@@ -42,6 +42,8 @@ await render();assert.equal(button('测试连接并保存').props.disabled,true)
 await button('登录 ChatGPT').props.onClick();await render();
 logged=true;job={id:'login',kind:'login',status:'complete'};await timer();await render();
 const model=nodes(tree).find(n=>n.props['aria-label']==='Agent 接入模型');
+assert.equal(model.type,'select','Authorized Codex models must be a full dropdown, not a filtered datalist');
+assert.deepEqual(nodes(model).filter(n=>n.type==='option').map(n=>n.props.value),['model-a','model-b','']);
 assert.equal(model.props.value,'model-a');model.props.onChange({target:{value:'model-b'}});await render();
 await button('测试连接并保存').props.onClick();await render();
 assert.ok([...session.keys()].every(k=>k.endsWith(':account:alice')));
@@ -49,4 +51,6 @@ job={...job,status:'complete'};await timer();await render();
 assert.equal(saved,undefined);assert.equal(session.size,1,'Failed persistence keeps the recoverable tested configuration');
 saveFails=false;await timer();await render();
 assert.equal(saved.provider,'codex-private');assert.equal(saved.model,'model-b');assert.equal(session.size,0);
+nodes(tree).find(n=>n.props['aria-label']==='Agent 接入模型').props.onChange({target:{value:''}});await render();
+assert.ok(nodes(tree).find(n=>n.props['aria-label']==='其他模型标识'),'Custom model entry remains available');
 console.log('Unified Codex login → model selection → probe → recoverable account save passed.');

@@ -19,6 +19,7 @@ function readCollapsed() { try { return localStorage.getItem(accountKey('va-side
 function Shell() {
   const { pathname, search } = useLocation();
   const state = useWorkspace();
+  const connected = state.previouslyTested && (state.status === 'authenticated' || state.status === 'saved');
   const { dark, toggle } = useDarkMode();
   const [collapsed, setCollapsed] = useState(readCollapsed);
   const [mobileOpen, setMobileOpen] = useState(false);
@@ -43,7 +44,7 @@ function Shell() {
     <div className={cn('border-b border-border', compact ? 'px-2 py-5' : 'px-5 py-4')}>
       <div className="flex items-center justify-between gap-1"><Link to="/" aria-label="Vibe AStock 首页" className="flex items-center gap-2.5"><PhoenixTreeLogo className="h-8 w-6 shrink-0 text-primary" />{!compact && <span className="workspace-brand text-lg font-semibold tracking-tight">Vibe-<span className="text-primary">AStock</span></span>}</Link>
         {mobile && <button type="button" onClick={() => setMobileOpen(false)} aria-label="关闭导航" className="p-2"><X className="h-4 w-4" /></button>}</div>
-      {!compact && <div data-ai-identity className="mt-2 space-y-1"><p className="text-[10px] leading-4 text-muted-foreground">A 股短线复盘与跟踪工作台</p><button type="button" onClick={state.connect} title={state.label} className="flex min-w-0 items-start gap-1 text-left text-[10px] leading-5 text-muted-foreground hover:text-primary"><span aria-hidden="true" className="mt-2 h-1 w-1 shrink-0 rounded-full bg-primary" /><span>{state.previouslyTested && (state.status === 'authenticated' || state.status === 'saved') ? `已接入AI：${state.name}` : state.label}</span></button><AgentToggle /></div>}
+      {!compact && <div data-ai-identity className="mt-2 space-y-1"><p className="text-[10px] leading-4 text-muted-foreground">A 股短线复盘与跟踪工作台</p><button type="button" onClick={state.connect} title={state.label} className={cn("flex min-w-0 items-start gap-1 text-left text-[10px] leading-5", connected ? "text-success hover:text-success" : "text-muted-foreground hover:text-primary")}><span aria-hidden="true" className="mt-2 h-1 w-1 shrink-0 rounded-full bg-current" /><span>{connected ? `已接入AI：${state.name}` : state.label}</span></button><AgentToggle /></div>}
       {compact && <div className="mt-3 flex justify-center"><AgentToggle compact /></div>}
     </div>
     <nav ref={mobile ? undefined : navRef} aria-label="产品导航" className={cn('min-h-0 flex-1 space-y-0.5 overflow-auto py-3', compact ? 'px-1.5' : 'px-3')}>
@@ -54,7 +55,6 @@ function Shell() {
     <div className={cn('border-t border-border', compact ? 'p-1.5' : 'p-3')}>
       <Link to="/settings" title="设置" aria-label="设置" aria-current={pathname === '/settings' ? 'page' : undefined} onClick={() => setMobileOpen(false)} className={cn('mb-2 flex min-h-10 items-center gap-2 rounded-lg text-sm text-muted-foreground hover:bg-muted hover:text-foreground', compact ? 'justify-center' : 'px-3')}><Cog className="h-4 w-4" />{!compact && '设置'}</Link>
       <div className={cn('flex items-center text-muted-foreground', compact ? 'flex-col gap-3' : 'justify-between gap-2')}>
-        {sharedWebsite && <button type="button" aria-label="退出登录" title="退出登录" onClick={() => void logoutWebsite().catch(e => toast.error(e.message))} className="flex min-h-9 items-center gap-2 p-1"><LogOut className="h-4 w-4" />{!compact && '退出登录'}</button>}
         {!mobile && <button type="button" onClick={collapse} aria-label={compact ? '展开侧栏' : '收起侧栏'} className="p-1">{compact ? <ChevronsRight className="h-3.5 w-3.5" /> : <ChevronsLeft className="h-3.5 w-3.5" />}</button>}
       </div>{storageError && <p role="alert" className="text-xs text-destructive">{storageError}</p>}
     </div>
@@ -66,7 +66,7 @@ function Shell() {
       <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
         <header className="workspace-topbar flex min-h-16 shrink-0 items-center justify-between gap-2 px-4 md:px-8">
           <div className="flex min-w-0 items-center gap-3 text-xs"><button type="button" aria-label="打开导航" onClick={() => setMobileOpen(true)} className="p-2 md:hidden"><Menu className="h-4 w-4" /></button><span className="hidden text-muted-foreground sm:inline">工作空间 /</span><strong className="truncate font-medium">{title}</strong></div>
-          <div className="flex shrink-0 items-center gap-2"><span className="hidden text-[10px] text-muted-foreground lg:inline">{APP_VERSION} · 本地开发版</span><button type="button" onClick={toggle} aria-label={dark ? '切换为浅色' : '切换为深色'} className="rounded p-2 text-muted-foreground hover:bg-muted">{dark ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}</button>{pathname !== '/' && <button type="button" onClick={() => setChatOpen(true)} className="ai-chat-trigger inline-flex items-center gap-1.5 rounded-full px-3 py-2 text-xs"><Sparkles className="h-4 w-4" />{state.enabled ? '问 Agent' : '问模型'}</button>}</div>
+          <div className="flex shrink-0 items-center gap-2"><span className="hidden text-[10px] text-muted-foreground lg:inline">{APP_VERSION} · 本地开发版</span><button type="button" onClick={toggle} aria-label={dark ? '切换为浅色' : '切换为深色'} className="rounded p-2 text-muted-foreground hover:bg-muted">{dark ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}</button>{sharedWebsite && <button type="button" aria-label="退出登录" title="退出登录" onClick={() => void logoutWebsite().catch(e => toast.error(e.message))} className="rounded p-2 text-muted-foreground hover:bg-muted"><LogOut className="h-4 w-4" /></button>}{pathname !== '/' && <button type="button" onClick={() => setChatOpen(true)} className="ai-chat-trigger inline-flex items-center gap-1.5 rounded-full px-3 py-2 text-xs"><Sparkles className="h-4 w-4" />{state.enabled ? '问 Agent' : '问模型'}</button>}</div>
         </header>
         <main ref={mainRef} id="workspace-main" tabIndex={-1} className="min-h-0 flex-1 overflow-auto"><div className="workspace-content"><Outlet /></div></main>
       </div>

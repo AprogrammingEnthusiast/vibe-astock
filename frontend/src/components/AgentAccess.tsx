@@ -36,6 +36,7 @@ export function AgentAccess({initialProvider,onSaved,onBusyChange}:{initialProvi
  const cli=['claude','codebuddy'].includes(provider);
  const api=!isSubscription(provider);
  const preset=API_PROVIDERS.find(p=>p.id===provider);
+ const codexModels=provider==='codex-private' ? catalog?.models?.map(m=>m.model) || [] : [];
  const validation=draftError({provider,model,baseURL,apiKey});
  useEffect(()=>{onBusyChange?.(busy);},[busy,onBusyChange]);
  useEffect(()=>{
@@ -114,7 +115,8 @@ export function AgentAccess({initialProvider,onSaved,onBusyChange}:{initialProvi
    <label className="block text-sm">API 服务商<select aria-label="Agent 接入来源" disabled={busy} value={provider} onChange={e=>choose(e.target.value)} className="mt-2 w-full rounded-lg border border-border bg-background p-3">{API_PROVIDERS.map(p=><option key={p.id} value={p.id}>{p.name}{['glm','kimi','qwen'].includes(p.id)?'（阿里云百炼）':p.id==='api-compatible'?' Responses API':''}</option>)}</select></label>
    <p className="text-xs leading-6 text-muted-foreground">{preset?.detail}</p>
   </>}
-  <label className="block text-sm">模型<input aria-label="Agent 接入模型" disabled={busy} value={model} onChange={e=>setModel(e.target.value)} list={modelListId} className="mt-2 w-full rounded-lg border border-border bg-background p-3" placeholder={cli?'default 表示订阅默认':'填写账户可用模型'}/><span className="mt-1 block text-xs text-muted-foreground">{api?'可选择预设，也可直接填写账户可用的模型标识。':cli?'default 使用订阅默认模型，也可指定账户可用模型。':'模型列表来自产品专用登录。'}</span></label>
+  {codexModels.length>0&&<label className="block text-sm">模型<select aria-label="Agent 接入模型" disabled={busy} value={codexModels.includes(model)?model:''} onChange={e=>setModel(e.target.value)} className="mt-2 w-full rounded-lg border border-border bg-background p-3">{codexModels.map(id=><option key={id} value={id}>{id}</option>)}<option value="">手动填写其他模型</option></select><span className="mt-1 block text-xs text-muted-foreground">已获取 {codexModels.length} 个账户模型。</span></label>}
+  {(!codexModels.length||!codexModels.includes(model))&&<label className="block text-sm">{codexModels.length?'其他模型':'模型'}<input aria-label={codexModels.length?"其他模型标识":"Agent 接入模型"} disabled={busy} value={model} onChange={e=>setModel(e.target.value)} list={modelListId} className="mt-2 w-full rounded-lg border border-border bg-background p-3" placeholder={cli?'default 表示订阅默认':'填写账户可用模型'}/><span className="mt-1 block text-xs text-muted-foreground">{api?'可选择预设，也可直接填写账户可用的模型标识。':cli?'default 使用订阅默认模型，也可指定账户可用模型。':'模型列表来自产品专用登录。'}</span></label>}
   <datalist id={modelListId}>{(provider==='codex-private'?catalog?.models?.map(m=>m.model):preset?.models.map(m=>m.id))?.map(id=><option key={id} value={id}/>)}</datalist>
   {cli&&<p role="status" className="text-xs leading-5">{subscription?.detail||'正在检测所选订阅安装与登录状态…'}</p>}
   {provider==='codex-private'&&<p className="text-sm">{catalog?.subscription_ready?'产品专用登录已建立':'产品专用 Codex 尚未登录'}<button type="button" disabled={busy} onClick={()=>void start('login')} className="ml-3 rounded border border-border px-3 py-2">登录 ChatGPT</button>{catalog?.models_error&&<span className="block text-xs">{catalog.models_error}</span>}</p>}

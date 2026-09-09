@@ -135,7 +135,12 @@ def test_admin_invites_use_ready_private_slots_and_activate_once(site, monkeypat
     monkeypatch.setattr(sharing.requests, "get", lambda *a, **kw: SimpleNamespace(status_code=503))
     assert alice.post("/api/admin/invitations", json={"username": "friend"}).status_code == 503
     assert alice.get("/api/admin/invitations").json()["available"] == 1
-    monkeypatch.setattr(sharing.requests, "get", lambda *a, **kw: SimpleNamespace(status_code=200))
+    import server
+    worker = TestClient(server.app, base_url="http://worker-private:8910")
+    assert worker.get("/api/health").status_code == 403
+    def worker_health(url, **kwargs):
+        return worker.get("/api/health", headers=kwargs.get("headers", {}))
+    monkeypatch.setattr(sharing.requests, "get", worker_health)
     assert alice.post("/api/admin/invitations", json={"username": "bobby"}).status_code == 409
     response = alice.post("/api/admin/invitations", json={"username": "friend"})
     assert response.status_code == 200

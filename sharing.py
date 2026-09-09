@@ -272,7 +272,7 @@ def issue_invite(username: str):
         raise HTTPException(409, "可邀请名额已用完，请先补充账号名额")
     for slot in slots:
         try:
-            response = requests.get(slot["worker"] + "/api/health", timeout=2, allow_redirects=False)
+            response = requests.get(slot["worker"] + "/api/health", headers={"Host": "localhost"}, timeout=2, allow_redirects=False)
             if response.status_code == 200:
                 break
         except requests.RequestException:

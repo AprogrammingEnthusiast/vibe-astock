@@ -11,6 +11,7 @@
 """
 
 from __future__ import annotations
+import account_context
 
 import datetime
 import re
@@ -114,7 +115,7 @@ def _resolve_code(name: str, name2code: dict) -> Optional[str]:
 
 # ---------------- 读写 ----------------
 def _load_review(date: str) -> Optional[dict]:
-    path = os.path.join(_REVIEW_DIR, f"{date}.json")
+    path = os.path.join(account_context.path(_REVIEW_DIR), f"{date}.json")
     if not os.path.exists(path):
         return None
     try:
@@ -125,9 +126,9 @@ def _load_review(date: str) -> Optional[dict]:
 
 
 def _save_reflection(result: dict) -> None:
-    os.makedirs(_REFLECT_DIR, exist_ok=True)
+    os.makedirs(account_context.path(_REFLECT_DIR), exist_ok=True)
     try:
-        path = safe_join(_REFLECT_DIR, f"{result['prediction_date']}.json")
+        path = safe_join(account_context.path(_REFLECT_DIR), f"{result['prediction_date']}.json")
         tmp = f"{path}.{uuid.uuid4().hex}.tmp"
         with open(tmp, "w", encoding="utf-8") as fh:
             json.dump(result, fh, ensure_ascii=False, indent=2)
@@ -374,7 +375,7 @@ def auto_evaluate_prior(current_date: str, *, strict: bool = False) -> Optional[
     failures = []
     for pd in sorted((d for d in review_store.dates() if d < current_date), reverse=True):
         try:
-            done = os.path.join(_REFLECT_DIR, f"{pd}.json")
+            done = os.path.join(account_context.path(_REFLECT_DIR), f"{pd}.json")
             if os.path.exists(done) and not _needs_reeval(done):
                 continue
             next_day = _next_trade_date(pd)
@@ -419,13 +420,13 @@ def latest_reflection(end: str | None = None) -> Optional[dict]:
     if end is not None:
         rows = reflections_as_of(end)
         return max(rows, key=lambda r: r["eval_date"]) if rows else None
-    if not os.path.isdir(_REFLECT_DIR):
+    if not os.path.isdir(account_context.path(_REFLECT_DIR)):
         return None
-    files = sorted(f for f in os.listdir(_REFLECT_DIR) if f.endswith(".json"))
+    files = sorted(f for f in os.listdir(account_context.path(_REFLECT_DIR)) if f.endswith(".json"))
     if not files:
         return None
     try:
-        with open(os.path.join(_REFLECT_DIR, files[-1]), encoding="utf-8") as fh:
+        with open(os.path.join(account_context.path(_REFLECT_DIR), files[-1]), encoding="utf-8") as fh:
             return json.load(fh)
     except Exception:
         return None
@@ -433,12 +434,12 @@ def latest_reflection(end: str | None = None) -> Optional[dict]:
 
 def _all_reflections() -> list[dict]:
     """按预测日升序读出全部命中回看记录。"""
-    if not os.path.isdir(_REFLECT_DIR):
+    if not os.path.isdir(account_context.path(_REFLECT_DIR)):
         return []
     out = []
-    for f in sorted(f for f in os.listdir(_REFLECT_DIR) if f.endswith(".json")):
+    for f in sorted(f for f in os.listdir(account_context.path(_REFLECT_DIR)) if f.endswith(".json")):
         try:
-            with open(os.path.join(_REFLECT_DIR, f), encoding="utf-8") as fh:
+            with open(os.path.join(account_context.path(_REFLECT_DIR), f), encoding="utf-8") as fh:
                 out.append(json.load(fh))
         except Exception:  # noqa: BLE001  单个坏文件不拖累整体
             continue
@@ -513,9 +514,9 @@ def get_past_context(limit: int = 5, *, end: str | None = None) -> str:
             {"prediction_date": r["prediction_date"], "eval_date": r["eval_date"],
              "phase_eval": r.get("phase_eval")} for r in rows], ensure_ascii=False)) if rows else ""
     """把近 limit 次命中回看摘成一段，供裁判 prompt 参考（记吃记打）。"""
-    if not os.path.isdir(_REFLECT_DIR):
+    if not os.path.isdir(account_context.path(_REFLECT_DIR)):
         return ""
-    files = sorted(f for f in os.listdir(_REFLECT_DIR) if f.endswith(".json"))[-limit:]
+    files = sorted(f for f in os.listdir(account_context.path(_REFLECT_DIR)) if f.endswith(".json"))[-limit:]
     if not files:
         return ""
     lines = ["【过往预测命中回看（供参考，避免重复追高/踏空）】"]
@@ -536,7 +537,7 @@ def get_past_context(limit: int = 5, *, end: str | None = None) -> str:
         )
     for f in reversed(files):
         try:
-            with open(os.path.join(_REFLECT_DIR, f), encoding="utf-8") as fh:
+            with open(os.path.join(account_context.path(_REFLECT_DIR), f), encoding="utf-8") as fh:
                 r = json.load(fh)
         except Exception:
             continue

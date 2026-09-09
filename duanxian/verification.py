@@ -16,6 +16,7 @@
 """
 
 from __future__ import annotations
+import account_context
 
 from typing import Callable, Optional
 
@@ -347,7 +348,7 @@ _USER_SCHEMA = 1
 
 
 def _user_path(date: str) -> str:
-    return os.path.join(_USER_DIR, f"{date}.json")
+    return os.path.join(account_context.path(_USER_DIR), f"{date}.json")
 
 
 def load_user_items(date: str) -> list[dict]:
@@ -384,7 +385,7 @@ def save_user_items(date: str, items: list[dict]) -> dict:
                       "reason": str(it.get("reason") or "")[:200], "by": "user"})
     if len(clean) > 8:
         raise ValueError("最多 8 条，太多了反而没重点")
-    os.makedirs(_USER_DIR, exist_ok=True)
+    os.makedirs(account_context.path(_USER_DIR), exist_ok=True)
     ok = atomic_write_json(_user_path(date),
                            {"schema": _USER_SCHEMA, "date": date, "items": clean})
     if not ok:

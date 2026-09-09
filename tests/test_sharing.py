@@ -6,7 +6,11 @@ import sys
 from types import SimpleNamespace
 
 import pytest
+from fastapi import FastAPI, Request
+from fastapi.responses import StreamingResponse
 from fastapi.testclient import TestClient
+
+import account_context
 
 import sharing
 import sharing_admin
@@ -60,7 +64,9 @@ def test_csrf_invite_reuse_and_failed_logins(site):
 
 def test_public_review_versions_never_call_ai(site, monkeypatch):
     alice, bob = site
-    monkeypatch.setattr(sharing, "forward", lambda *a: pytest.fail("Reading public review invoked a worker"))
+    async def fail_backend(*args):
+        pytest.fail("Reading public review invoked the private backend")
+    monkeypatch.setattr(sharing.app.state, "backend", fail_backend, raising=False)
     with sharing.connect() as db:
         owners = [dict(r) for r in db.execute("SELECT * FROM users ORDER BY username")]
     payload = {"target_date": "2026-09-07", "focus_md": "public market facts " * 30,
@@ -87,75 +93,83 @@ def test_public_review_versions_never_call_ai(site, monkeypatch):
     assert bob.get("/api/review/latest").json()["publication"]["author"] == "bobby"
 
 
-def test_private_proxy_is_bound_to_session_and_preserves_streams(site, monkeypatch):
+def test_private_backend_is_bound_to_session_and_preserves_streams(site, monkeypatch):
     alice, bob = site
-    calls, closed = [], []
-    def fake_request(method, url, **kwargs):
-        assert kwargs["headers"]["Host"] == "localhost"
-        calls.append((url, kwargs))
-        return SimpleNamespace(status_code=200, headers={"Content-Type": "application/x-ndjson"},
-            iter_content=lambda **kw: iter([b'{"type":"delta","text":"ok"}\n', b'{"type":"done"}\n']),
-            close=lambda: closed.append(True))
-    monkeypatch.setattr(sharing.requests, "request", fake_request)
+    backend = FastAPI()
+    calls, streamed = [], []
+
+    @backend.post("/api/chat")
+    async def chat(request: Request):
+        account = account_context.current()
+        assert request.headers["host"] == "localhost"
+        assert all(name not in request.headers for name in
+                   ("authorization", "x-vibe-worker", "x-vibe-account", "cookie"))
+        assert (await request.json())["user_id"] == "alice"
+        calls.append((account["id"], account["home"]))
+
+        def events():
+            current = account_context.current()
+            streamed.append(current["id"])
+            yield json.dumps({"type": "delta", "text": current["id"]}) + "\n"
+            yield '{"type":"done"}\n'
+
+        return StreamingResponse(events(), media_type="application/x-ndjson")
+
+    monkeypatch.setattr(sharing.app.state, "backend", backend, raising=False)
     for client in (alice, bob):
-        response = client.post("/api/chat", json={"user_id": "alice", "worker": "http://evil", "messages": []}, headers={"Authorization": "Bearer forged", "X-Vibe-Worker": "forged"})
+        response = client.post("/api/chat", json={"user_id": "alice", "worker": "http://evil", "messages": []},
+                               headers={"Authorization": "Bearer forged", "X-Vibe-Worker": "forged"})
         assert response.status_code == 200 and '"done"' in response.text
         assert response.headers["cache-control"] == "no-store"
-    assert len(closed) == 2
-    assert calls[0][0] != calls[1][0]
-    assert calls[0][1]["headers"]["X-Vibe-Worker"] != calls[1][1]["headers"]["X-Vibe-Worker"]
-    assert all("forged" not in str(options["headers"]) for _, options in calls)
+        assert json.loads(response.text.splitlines()[0])["text"] == client.headers["X-Vibe-Account"]
+        assert account_context.current() is None
+    expected = [client.headers["X-Vibe-Account"] for client in (alice, bob)]
+    assert [identity for identity, _ in calls] == streamed == expected
+    assert [home for _, home in calls] == [sharing.DB.parent / "homes" / identity for identity in expected]
 
 
-def test_deployment_has_distinct_volumes_networks_and_no_owner_fallback(site):
+def test_deployment_uses_one_application_and_persistent_account_homes(site):
     config = sharing_admin.manifest(8910, True)
-    workers = [s for key, s in config["services"].items() if key.startswith("worker-")]
-    assert len(workers) == 2
-    assert workers[0]["volumes"] != workers[1]["volumes"]
-    assert workers[0]["networks"] != workers[1]["networks"]
-    for worker in workers:
-        assert "ports" not in worker and "env_file" not in worker
-        assert "MIMO_API_KEY" not in worker["environment"]
-        assert worker["read_only"] and "no-new-privileges:true" in worker["security_opt"]
-    assert config["services"]["gateway"]["environment"]["VIBE_COOKIE_SECURE"] == "1"
+    assert set(config["services"]) == {"gateway"}
+    service = config["services"]["gateway"]
+    assert service["volumes"] == ["accounts:/home/app/sharing"]
+    assert "env_file" not in service and "networks" not in config
+    assert "MIMO_API_KEY" not in service["environment"]
+    assert service["read_only"] and "no-new-privileges:true" in service["security_opt"]
+    assert service["environment"]["VIBE_SHARED_APP"] == "1"
+    assert service["environment"]["VIBE_COOKIE_SECURE"] == "1"
+    assert set(config["volumes"]) == {"accounts"}
 
 
-def test_admin_invites_use_ready_private_slots_and_activate_once(site, monkeypatch):
+def test_admin_invites_create_members_without_containers_and_activate_once(site):
     alice, bob = site
     assert bob.get("/api/admin/invitations").status_code == 403
     assert bob.post("/api/admin/invitations", json={"username": "friend"}).status_code == 403
     assert alice.post("/api/admin/invitations", headers={"Origin": "https://evil.example"}, json={"username": "friend"}).status_code == 403
     assert alice.post("/api/admin/invitations", json={"username": "../owner"}).status_code == 400
-    assert alice.post("/api/admin/invitations", json={"username": "friend"}).status_code == 409
-    sharing_admin.add_slots(1)
     before = sharing_admin.manifest(8910, True)
     listing = alice.get("/api/admin/invitations").json()
-    assert listing["available"] == 1 and len(listing["members"]) == 2
+    assert "available" not in listing and len(listing["members"]) == 2
     assert "worker_key" not in json.dumps(listing) and "password" not in json.dumps(listing)
-    monkeypatch.setattr(sharing.requests, "get", lambda *a, **kw: SimpleNamespace(status_code=503))
-    assert alice.post("/api/admin/invitations", json={"username": "friend"}).status_code == 503
-    assert alice.get("/api/admin/invitations").json()["available"] == 1
-    import server
-    worker = TestClient(server.app, base_url="http://worker-private:8910")
-    assert worker.get("/api/health").status_code == 403
-    def worker_health(url, **kwargs):
-        return worker.get("/api/health", headers=kwargs.get("headers", {}))
-    monkeypatch.setattr(sharing.requests, "get", worker_health)
     assert alice.post("/api/admin/invitations", json={"username": "bobby"}).status_code == 409
     response = alice.post("/api/admin/invitations", json={"username": "friend"})
     assert response.status_code == 200
     invitation = response.json()
-    assert alice.get("/api/admin/invitations").json()["available"] == 0
-    assert sharing_admin.manifest(8910, True) == before  # No shared homes or container mutation.
+    assert alice.post("/api/admin/invitations", json={"username": "friend"}).status_code == 409
+    assert sharing_admin.manifest(8910, True) == before
     with sharing.connect() as db:
         friend = dict(db.execute("SELECT * FROM users WHERE username='friend'").fetchone())
     assert friend["invite"] == sharing.digest(invitation["invite"]) and not friend["admin"]
-    with TestClient(sharing.app, headers={"X-Vibe-Request": "1"}) as client:
+    # No app lifespan or real backend startup is needed to activate a new member.
+    client = TestClient(sharing.app, headers={"X-Vibe-Request": "1"})
+    try:
         payload = {**invitation, "password": "friends-own-password"}
         assert client.post("/api/account/activate", json=payload).status_code == 200
         me = client.get("/api/account/me").json()
         assert me["watchlist"] is None and me["user"]["username"] == "friend"
         assert client.post("/api/account/activate", json=payload).status_code == 401
+    finally:
+        client.close()
     assert alice.get("/api/admin/invitations").json()["members"][-1]["status"] == "active"
 
 

@@ -4,7 +4,7 @@ import { Copy, UserPlus, Users } from "lucide-react";
 import { toast } from "sonner";
 import { accountRequest, websiteUser } from "@/lib/account";
 
-interface MembersData { available: number; members: { username: string; admin: boolean; status: string }[]; }
+interface MembersData { members: { username: string; admin: boolean; status: string }[]; }
 
 export function Members() {
   const [data, setData] = useState<MembersData | null>(null);
@@ -40,13 +40,13 @@ export function Members() {
           <input id="member-name" value={username} onChange={e => setUsername(e.target.value)} required minLength={3} maxLength={32}
             pattern="[a-z][a-z0-9_\-]{2,31}" autoComplete="off" autoCapitalize="none" spellCheck={false} aria-describedby="member-name-hint"
             className="min-h-11 min-w-0 flex-1 rounded-xl border border-border bg-background px-3 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary" placeholder="例如 friend01" />
-          <button disabled={busy || !data?.available} className={`${button} bg-primary text-primary-foreground`}>
+          <button disabled={busy || !data} className={`${button} bg-primary text-primary-foreground`}>
             <UserPlus aria-hidden="true" className="h-4 w-4" />{busy ? "正在生成…" : "生成邀请码"}
           </button>
         </div>
         <p id="member-name-hint" className="mt-2 text-xs leading-6 text-muted-foreground">3–32 位小写字母、数字、下划线或短横线，以字母开头。</p>
       </form>
-      <p className="mt-4 text-sm text-muted-foreground" role="status">{data ? data.available ? `还可邀请 ${data.available} 位朋友` : "邀请名额已用完，请在服务器补充名额。已有成员不受影响。" : "正在读取邀请名额…"}</p>
+      {!data && !error && <p className="mt-4 text-sm text-muted-foreground" role="status">正在读取成员列表…</p>}
       {error && <div className="mt-4" role="alert"><p className="text-sm text-danger">{error}</p><button className={`${button} mt-2 border border-border`} onClick={() => void refresh()}>刷新成员列表</button></div>}
       {invitation && <div className="mt-6 border-t border-border pt-5">
         <label htmlFor="invitation-text" className="text-sm font-semibold">邀请码已生成，请复制给对应朋友</label>

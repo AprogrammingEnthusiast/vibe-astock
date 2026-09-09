@@ -25,7 +25,7 @@ COPY --from=frontend /usr/local/bin/node /usr/local/bin/node
 COPY --from=frontend /usr/local/lib/node_modules/@openai/codex /usr/local/lib/node_modules/@openai/codex
 RUN ln -s /usr/local/lib/node_modules/@openai/codex/bin/codex.js /usr/local/bin/codex \
     && codex --version
-COPY main.py server.py sharing.py sharing_schema.py sharing_worker.py sharing_admin.py ./
+COPY main.py server.py account_context.py sharing.py sharing_schema.py sharing_worker.py sharing_admin.py ./
 COPY --from=frontend /app/runtime /app/runtime
 COPY review_agent/ ./review_agent/
 COPY backtest/ ./backtest/

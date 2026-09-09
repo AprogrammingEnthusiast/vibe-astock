@@ -1,5 +1,6 @@
 """Local-only API and a bounded background worker for public review questions."""
 from __future__ import annotations
+import account_context
 
 import hmac
 import os
@@ -194,7 +195,7 @@ class Manager:
                                              bundle_factory, body.conversation_id, context)
             if created:
                 cancel = threading.Event()
-                thread = threading.Thread(target=self._work, args=(turn, key, cancel), daemon=True)
+                thread = account_context.thread(target=self._work, args=(turn, key, cancel), daemon=True)
                 self.active = (turn["id"], cancel, thread)
                 thread.start()
         return turn
@@ -387,7 +388,7 @@ def create_router(manager_source: Manager | Callable[[], Manager], access_key: s
             (manager.runtime.home / "auth.json").unlink(missing_ok=True)
             import sharing_worker
             if sharing_worker.ENABLED:
-                (Path.home() / ".codex" / "auth.json").unlink(missing_ok=True)
+                (account_context.home() / ".codex" / "auth.json").unlink(missing_ok=True)
                 sharing_worker.write_profile(None)
                 sharing_worker.write_profile(None, sharing_worker.PROFILE.with_name("agent-connection.json"))
         return {"ok": True}

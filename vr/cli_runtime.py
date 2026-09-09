@@ -8,6 +8,7 @@ CLI 不做 function-calling（不像 API 那条能让 AI 自己调数据工具�
 """
 
 from __future__ import annotations
+import account_context
 
 import os
 import queue
@@ -62,22 +63,29 @@ class CliUnavailable(RuntimeError):
 
 
 def codex_env() -> dict[str, str]:
-    if not os.environ.get("VIBE_WORKER_KEY"):
+    if not (account_context.ENABLED or os.environ.get("VIBE_WORKER_KEY")):
         return dict(os.environ)
     # Never pass gateway credentials or API fallback keys to the model's process.
     allowed = {"PATH", "HOME", "USER", "LANG", "LC_ALL", "TMPDIR", "TEMP", "TMP", "SYSTEMROOT",
                "SSL_CERT_FILE", "SSL_CERT_DIR", "CODEX_CA_CERTIFICATE"}
-    return {**{k: v for k, v in os.environ.items() if k in allowed},
-            "CODEX_HOME": os.environ["CODEX_HOME"]}
+    env = {k: v for k, v in os.environ.items() if k in allowed}
+    if account_context.ENABLED:
+        env.update(HOME=str(account_context.home()), USERPROFILE=str(account_context.home()),
+                   CODEX_HOME=str(account_context.home() / ".codex"))
+    else:
+        env["CODEX_HOME"] = os.environ["CODEX_HOME"]
+    return env
 
 
 def codex_auth_args() -> list[str]:
     return (["-c", 'cli_auth_credentials_store="file"', "-c", 'forced_login_method="chatgpt"']
-            if os.environ.get("VIBE_WORKER_KEY") else [])
+            if account_context.ENABLED or os.environ.get("VIBE_WORKER_KEY") else [])
 
 
 def _execution_args(kind: str, args: list[str]) -> list[str]:
-    if kind == "codex" and os.environ.get("VIBE_WORKER_KEY"):
+    if account_context.ENABLED and kind != "codex":
+        raise CliUnavailable("共享站点仅支持本人的 Codex 登录或 API Key")
+    if kind == "codex" and (account_context.ENABLED or os.environ.get("VIBE_WORKER_KEY")):
         return [*codex_auth_args(), "-a", "never", "exec", "--ignore-user-config", "--ignore-rules",
                 "--ephemeral", "--sandbox", "read-only", "--disable", "shell_tool", *args[1:]]
     return args
@@ -255,15 +263,15 @@ def _run_cli_stream(kind: str, system_prompt: str, user_prompt: str, model: str 
 
 
 def run_cli(kind: str, system_prompt: str, user_prompt: str, model: str = "") -> str:
-    if kind != "codex" or not os.environ.get("VIBE_WORKER_KEY"):
+    if kind != "codex" or not (account_context.ENABLED or os.environ.get("VIBE_WORKER_KEY")):
         return _run_cli(kind, system_prompt, user_prompt, model)
-    # One account per worker; serialize credential use with login/logout to avoid resurrection after logout.
+    # ponytail: legacy CLI credential use is serialized; use per-account locks if contention matters.
     with credential_lock:
         return _run_cli(kind, system_prompt, user_prompt, model)
 
 
 def run_cli_stream(kind: str, system_prompt: str, user_prompt: str, model: str = ""):
-    if kind != "codex" or not os.environ.get("VIBE_WORKER_KEY"):
+    if kind != "codex" or not (account_context.ENABLED or os.environ.get("VIBE_WORKER_KEY")):
         yield from _run_cli_stream(kind, system_prompt, user_prompt, model)
         return
     with credential_lock:

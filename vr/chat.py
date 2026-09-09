@@ -156,7 +156,8 @@ def _exec_tool(name: str, args: dict):
 
 
 # —— 防 SSRF：用户可自带 OpenAI 兼容端点，但后端替其发请求前要挡住指向云元数据/内网的地址 ——
-_PUBLIC_MODE = bool(os.environ.get("VR_API_KEY", "").strip())  # 设了鉴权≈公网部署姿态
+import account_context
+_PUBLIC_MODE = account_context.ENABLED or bool(os.environ.get("VR_API_KEY", "").strip())
 _METADATA_NETS = [ipaddress.ip_network("169.254.0.0/16"), ipaddress.ip_network("fe80::/10")]
 _PRIVATE_NETS = [ipaddress.ip_network(n) for n in
                  ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "127.0.0.0/8", "::1/128", "fc00::/7")]
@@ -321,7 +322,8 @@ def translate_headlines(cfg: dict, items_input: list) -> list[dict[str, str]]:
         import threading
         from pathlib import Path
         from review_agent.runtime import Runtime, connection
-        runtime = Runtime(Path(os.environ.get("ASTOCK_AGENT_HOME", "~/.vibe-astock-agent")).expanduser())
+        import account_context
+        runtime = Runtime(account_context.path(Path(os.environ.get("ASTOCK_AGENT_HOME", "~/.vibe-astock-agent")).expanduser()))
         source, key = connection(cfg)
         with tempfile.TemporaryDirectory(prefix="translation-", dir=runtime.root) as tmp:
             run = Path(tmp)
@@ -377,8 +379,6 @@ def list_models(cfg: dict) -> list[str]:
                 and not any(ord(char) < 32 or ord(char) == 127 for char in model)
                 and model not in models):
             models.append(model)
-        if len(models) == 500:
-            break
     return models
 
 

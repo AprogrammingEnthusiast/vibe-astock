@@ -1,5 +1,6 @@
 """Existing four-analyst workflow bound to the selected isolated AI source."""
 from __future__ import annotations
+import account_context
 
 import json
 import threading
@@ -69,7 +70,7 @@ class DeepDive(Daily):
                         "source": source, "running": True, "status": "running", "stage": "核对标的与行情",
                         "started": time.time(), "elapsed": 0, "error": None}
         self._update()
-        self.worker = threading.Thread(target=self._work, args=(body.stock.strip(), source, key), daemon=True)
+        self.worker = account_context.thread(target=self._work, args=(body.stock.strip(), source, key), daemon=True)
         self.worker.start()
         return self.snapshot()
 

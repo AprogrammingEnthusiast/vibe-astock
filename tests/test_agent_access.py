@@ -51,11 +51,14 @@ def test_only_one_access_operation_and_cancellation(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("success", [False, True])
-@pytest.mark.parametrize("shared", [False, True])
+@pytest.mark.parametrize("shared", [False, True, "single"])
 def test_login_protocol_uses_staging_and_installs_only_on_success(tmp_path, monkeypatch, shared, success):
     import sys
     import review_agent.access as module
-    if shared:
+    import account_context
+    from contextlib import nullcontext
+    monkeypatch.setattr(account_context, 'ENABLED', shared == 'single')
+    if shared is True:
         monkeypatch.setenv('VIBE_WORKER_KEY', 'test-worker')
     else:
         monkeypatch.delenv('VIBE_WORKER_KEY', raising=False)
@@ -86,8 +89,9 @@ for line in sys.stdin:
         updates.append(values)
         original(**values)
     monkeypatch.setattr(access, '_update', record)
-    access.start('login')
-    state=wait(access)
+    with account_context.bind({'id': 'a' * 32}, tmp_path / 'homes') if shared == 'single' else nullcontext():
+        access.start('login')
+        state=wait(access)
     assert state['status']==('complete' if success else 'failed')
     assert state.get('user_code') is None
     if shared:

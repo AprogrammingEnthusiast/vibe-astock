@@ -1,6 +1,22 @@
 """短线复盘 Web 后端 —— FastAPI 包住复盘图 + 缓存 + 静态前端"""
 
 from __future__ import annotations
+import account_context
+
+
+def _state():
+    import sys
+    return account_context.state(sys.modules[__name__], lambda: {
+        '_job': {
+            "running": False, "job_id": None, "date": None, "error": None,
+            "started": None, "elapsed": 0, "finished_at": None,
+        },
+        '_dd_job': {
+            "running": False, "job_id": None, "stock": None, "error": None,
+            "started": None, "elapsed": 0, "finished_at": None,
+        },
+        '_codex_login': {"process": None, "deviceAuth": None, "failed": False},
+    })
 
 import html
 import hmac
@@ -107,6 +123,8 @@ def _merge_vr_routes() -> int:
 
 def _guard_vr_userdata() -> None:
     """启动时给 VR 的**不可再生用户数据**留一份备份"""
+    if account_context.ENABLED:
+        return  # Existing account data is imported explicitly, never from the host home.
     import shutil
 
     vr_home = os.environ.get("VR_DATA_DIR") or os.path.expanduser("~/.vibe-astock-agent/market-data")
@@ -276,7 +294,7 @@ _POOL_PINNED = _pin_pool_to_settled_session()
 _guard_vr_userdata()
 _DISABLED_CLIS = _disable_unsafe_clis()
 
-_VR_API_KEY = os.environ.get("VR_API_KEY", "").strip()
+_VR_API_KEY = "" if account_context.ENABLED else os.environ.get("VR_API_KEY", "").strip()
 
 # This addition is local-only and has its own credentials/data directory.
 from review_agent.api import Manager as ReviewAgentManager, create_router as review_agent_router
@@ -285,9 +303,22 @@ from review_agent.store import Store as ReviewAgentStore
 from review_agent.evidence import EvidenceError as ReviewAgentError
 
 _REVIEW_AGENT_ROOT = Path(os.environ.get("ASTOCK_AGENT_HOME", "~/.vibe-astock-agent")).expanduser().resolve()
+_manager_lock = threading.RLock()
 
 
 def _get_review_agent(_app=app):
+    if account_context.ENABLED:
+        user = account_context.current()
+        if user is None:
+            raise ReviewAgentError("请先登录网站")
+        with _manager_lock:
+            managers = _app.state.review_agents
+            if user["id"] not in managers:
+                root = account_context.path(_REVIEW_AGENT_ROOT)
+                manager = ReviewAgentManager(ReviewAgentStore(root), Path(account_context.path(_REVIEW_DIR)), ReviewAgentRuntime(root))
+                sharing_worker.prepare_agent(manager.runtime)
+                managers[user["id"]] = manager
+            return managers[user["id"]]
     manager = getattr(_app.state, "review_agent", None)
     if manager is None:
         raise ReviewAgentError("复盘 Agent 服务尚未启动")
@@ -424,15 +455,15 @@ def _run_review(date: str, job_id: str) -> None:
         _capture_backtest_corpus(date)   # 复盘写完再囤语料，失败也不影响已产出的复盘
     except Exception as exc:  # noqa: BLE001
         with _lock:
-            if _job["job_id"] == job_id:
-                _job["error"] = f"{type(exc).__name__}: {exc}"
+            if _state()._job["job_id"] == job_id:
+                _state()._job["error"] = f"{type(exc).__name__}: {exc}"
     finally:
         with _lock:
-            if _job["job_id"] == job_id:  # 只结束属于自己的任务（#5）
-                _job["running"] = False
-                if _job["started"]:
-                    _job["elapsed"] = int(time.time() - _job["started"])  # 收尾定格 elapsed（#17）
-                _job["finished_at"] = china_now().strftime("%Y-%m-%d %H:%M:%S") + " CST"
+            if _state()._job["job_id"] == job_id:  # 只结束属于自己的任务（#5）
+                _state()._job["running"] = False
+                if _state()._job["started"]:
+                    _state()._job["elapsed"] = int(time.time() - _state()._job["started"])  # 收尾定格 elapsed（#17）
+                _state()._job["finished_at"] = china_now().strftime("%Y-%m-%d %H:%M:%S") + " CST"
 
 
 def _origin_ok(request: Request) -> bool:
@@ -445,7 +476,7 @@ def _origin_ok(request: Request) -> bool:
 
 @app.post("/api/review/run")
 def api_run(request: Request, date: str | None = None):
-    if getattr(app.state, "review_agent", None) is not None:
+    if account_context.ENABLED or getattr(app.state, "review_agent", None) is not None:
         return JSONResponse({"error": "生成入口已升级，请刷新页面并使用已保存的复盘 AI 来源"}, status_code=409)
     if not _origin_ok(request):
         return JSONResponse({"error": "非法来源"}, status_code=403)
@@ -481,14 +512,14 @@ def api_run(request: Request, date: str | None = None):
                     "message": f"{date} 当日已完成复盘"}
         if sharing_worker.ENABLED and not sharing_worker.selected_llm():
             return JSONResponse({"error": "请先连接你自己的 AI"}, status_code=400)
-        if _job["running"] and not _job_stuck(_job, _JOB_TIMEOUT):
-            return {"running": True, "date": _job["date"]}
-        if _job["running"]:   # 卡死的旧任务：让位，并把原因如实写进 error
-            _job["error"] = f"上一个任务（{_job.get('date')}）超过 {_JOB_TIMEOUT // 60} 分钟无响应，已判为卡死"
+        if _state()._job["running"] and not _job_stuck(_state()._job, _JOB_TIMEOUT):
+            return {"running": True, "date": _state()._job["date"]}
+        if _state()._job["running"]:   # 卡死的旧任务：让位，并把原因如实写进 error
+            _state()._job["error"] = f"上一个任务（{_state()._job.get('date')}）超过 {_JOB_TIMEOUT // 60} 分钟无响应，已判为卡死"
         job_id = uuid.uuid4().hex
-        _job.update(running=True, job_id=job_id, date=date, error=None,
+        _state()._job.update(running=True, job_id=job_id, date=date, error=None,
                     started=time.time(), elapsed=0, finished_at=None)
-    threading.Thread(target=_run_review, args=(date, job_id), daemon=True).start()
+    account_context.thread(target=_run_review, args=(date, job_id), daemon=True).start()
     return {"running": True, "date": date, "job_id": job_id}
 
 
@@ -510,7 +541,7 @@ def _codex_command() -> list[str]:
 
 
 def _codex_home() -> str:
-    return os.environ.get("CODEX_HOME") or os.path.expanduser("~/.codex")
+    return account_context.path(os.environ.get("CODEX_HOME") or os.path.expanduser("~/.codex"))
 
 
 def _codex_env() -> dict:
@@ -588,8 +619,8 @@ def _watch_codex_login(process: subprocess.Popen) -> None:
             )
             if code and "https://auth.openai.com/codex/device" in plain:
                 with _codex_login_lock:
-                    if _codex_login["process"] is process:
-                        _codex_login["deviceAuth"] = {
+                    if _state()._codex_login["process"] is process:
+                        _state()._codex_login["deviceAuth"] = {
                             "verificationUrl": "https://auth.openai.com/codex/device",
                             "userCode": code.group(1),
                         }
@@ -600,8 +631,8 @@ def _watch_codex_login(process: subprocess.Popen) -> None:
     finally:
         timer.cancel()
         with _codex_login_lock:
-            if _codex_login["process"] is process:
-                _codex_login.update(
+            if _state()._codex_login["process"] is process:
+                _state()._codex_login.update(
                     process=None, deviceAuth=None, failed=returncode != 0,
                 )
 
@@ -635,7 +666,7 @@ def api_codex_login(request: Request):
     if not command:
         return JSONResponse({"error": "Codex CLI 未安装"}, status_code=409)
     with _codex_login_lock:
-        current = _codex_login["process"]
+        current = _state()._codex_login["process"]
         if current is not None and current.poll() is None:
             return {"state": "pending"}
         env = _codex_env()
@@ -648,8 +679,8 @@ def api_codex_login(request: Request):
             )
         except OSError:
             return JSONResponse({"error": "Codex 登录进程启动失败"}, status_code=500)
-        _codex_login.update(process=process, deviceAuth=None, failed=False)
-    threading.Thread(target=_watch_codex_login, args=(process,), daemon=True).start()
+        _state()._codex_login.update(process=process, deviceAuth=None, failed=False)
+    account_context.thread(target=_watch_codex_login, args=(process,), daemon=True).start()
     return {"state": "started"}
 
 
@@ -658,13 +689,13 @@ def api_codex_login(request: Request):
 def api_codex_logout(request: Request):
     if not _origin_ok(request):
         raise HTTPException(403, "非法来源")
-    if _job["running"] or _dd_job["running"]:
+    if _state()._job["running"] or _state()._dd_job["running"]:
         raise HTTPException(409, "请等待当前分析任务结束后再断开订阅")
     with _codex_login_lock:
-        process = _codex_login["process"]
+        process = _state()._codex_login["process"]
         if process is not None:
             _terminate_codex_login(process)
-        _codex_login.update(process=None, deviceAuth=None, failed=False)
+        _state()._codex_login.update(process=None, deviceAuth=None, failed=False)
     command = _codex_command()
     if command:
         result = subprocess.run([*command, "logout"], env=_codex_env(),
@@ -699,10 +730,10 @@ def api_cli_available():
             authenticated = _codex_authenticated(command)
             models = _codex_models(command) if authenticated else []
             with _codex_login_lock:
-                pending = (_codex_login["process"] is not None
-                           and _codex_login["process"].poll() is None)
-                device_auth = _codex_login["deviceAuth"] if pending else None
-                failed = _codex_login["failed"]
+                pending = (_state()._codex_login["process"] is not None
+                           and _state()._codex_login["process"].poll() is None)
+                device_auth = _state()._codex_login["deviceAuth"] if pending else None
+                failed = _state()._codex_login["failed"]
             status = ("ready" if authenticated else "login_pending" if pending
                       else "login_failed" if failed else "not_authenticated")
             item.update({
@@ -732,12 +763,12 @@ def api_cli_available():
 @app.get("/api/review/status")
 def api_status():
     with _lock:
-        snap = dict(_job)
+        snap = dict(_state()._job)
     if snap["running"] and snap["started"]:
         snap["elapsed"] = int(time.time() - snap["started"])
     snap.pop("started", None)
     if sharing_worker.ENABLED:
-        snap["publication_pending"] = any(sharing_worker.OUTBOX.glob("*.json"))
+        snap["publication_pending"] = any(account_context.path(sharing_worker.OUTBOX).glob("*.json"))
     return snap
 
 
@@ -855,7 +886,7 @@ _wk_lock = threading.Lock()
 
 
 def _wk_load():
-    path = os.path.join(_WK_DIR, "latest.json")
+    path = os.path.join(account_context.path(_WK_DIR), "latest.json")
     try:
         with open(path, encoding="utf-8") as fh:
             return json.load(fh)
@@ -929,16 +960,16 @@ def _weekly(force: bool):
                 w["revision"] = revision
                 if cached2:
                     prior_id = hashlib.sha256(json.dumps(cached2, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
-                    prior_path = safe_join(_WK_DIR, "prior-" + prior_id + ".json")
+                    prior_path = safe_join(account_context.path(_WK_DIR), "prior-" + prior_id + ".json")
                     if cached2.get("revision") != revision and not os.path.exists(prior_path):
                         _atomic_write(prior_path, cached2)
                     w["revised_days"] = [d["date"] for d in w["days"] for old in cached2.get("days", [])
                                          if d["date"] == old.get("date") and any(d.get(k) != old.get(k)
                                          for k in ("limit_up", "highest_consec", "broken_rate", "leaders") if k in old)]
-                archive_path = safe_join(_WK_DIR, "revision-" + revision + ".json")
+                archive_path = safe_join(account_context.path(_WK_DIR), "revision-" + revision + ".json")
                 if not os.path.exists(archive_path):
                     _atomic_write(archive_path, w)
-                _atomic_write(safe_join(_WK_DIR, "latest.json"), w)
+                _atomic_write(safe_join(account_context.path(_WK_DIR), "latest.json"), w)
             except Exception:  # noqa: BLE001
                 w.setdefault("warnings", []).append("本次数据已取得，但版本归档失败；未确认保存成功")
             return JSONResponse(w)
@@ -1005,7 +1036,7 @@ def _load_latest_json(dirpath: str) -> dict:
 
 
 def _review_context(version: str | None = None) -> str:
-    d = sharing_worker.shared_review(version=version) if sharing_worker.ENABLED else _load_latest_json(_REVIEW_DIR)
+    d = sharing_worker.shared_review(version=version) if sharing_worker.ENABLED else _load_latest_json(account_context.path(_REVIEW_DIR))
     if not d:
         return "（暂无复盘数据，请先在复盘 Agent 生成一次复盘。）"
     parts = [f"复盘交易日 {d.get('target_date', '')}", f"【明天关注点】\n{d.get('focus_md', '')}"]
@@ -1652,21 +1683,21 @@ def _run_dd(stock: str, job_id: str) -> None:
             error = final["error"]
         else:
             payload = _serialize_dd(final)
-            _atomic_write(safe_join(_DD_DIR, "latest.json"), payload)
+            _atomic_write(safe_join(account_context.path(_DD_DIR), "latest.json"), payload)
             if payload.get("code"):
-                _atomic_write(safe_join(_DD_DIR, f"{payload['code']}.json"), payload)
+                _atomic_write(safe_join(account_context.path(_DD_DIR), f"{payload['code']}.json"), payload)
             if sharing_worker.ENABLED:
                 sharing_worker.queue_publication(payload)
     except Exception as exc:  # noqa: BLE001
         error = f"{type(exc).__name__}: {exc}"
     finally:
         with _lock:
-            if _dd_job["job_id"] == job_id:
-                _dd_job["running"] = False
-                _dd_job["error"] = error
-                if _dd_job["started"]:
-                    _dd_job["elapsed"] = int(time.time() - _dd_job["started"])
-                _dd_job["finished_at"] = china_now().strftime("%Y-%m-%d %H:%M:%S") + " CST"
+            if _state()._dd_job["job_id"] == job_id:
+                _state()._dd_job["running"] = False
+                _state()._dd_job["error"] = error
+                if _state()._dd_job["started"]:
+                    _state()._dd_job["elapsed"] = int(time.time() - _state()._dd_job["started"])
+                _state()._dd_job["finished_at"] = china_now().strftime("%Y-%m-%d %H:%M:%S") + " CST"
 
 
 @app.post("/api/deepdive/run")
@@ -1681,23 +1712,23 @@ def _legacy_dd_run(request: Request, stock: str):
     if not stock:
         return JSONResponse({"error": "缺 stock 参数（6 位代码或简称）"}, status_code=400)
     with _lock:
-        if _dd_job["running"] and not _job_stuck(_dd_job, _DD_TIMEOUT):
+        if _state()._dd_job["running"] and not _job_stuck(_state()._dd_job, _DD_TIMEOUT):
             # 繁忙：明确告知当前占用的是哪只票，前端据此不误加载别人的结果
-            return {"running": True, "busy": True, "stock": _dd_job["stock"]}
-        if _dd_job["running"]:   # 卡死的旧任务让位（同 api_run，见 _job_stuck）
-            _dd_job["error"] = (f"上一次深挖（{_dd_job.get('stock')}）超过 "
+            return {"running": True, "busy": True, "stock": _state()._dd_job["stock"]}
+        if _state()._dd_job["running"]:   # 卡死的旧任务让位（同 api_run，见 _job_stuck）
+            _state()._dd_job["error"] = (f"上一次深挖（{_state()._dd_job.get('stock')}）超过 "
                                 f"{_DD_TIMEOUT // 60} 分钟无响应，已判为卡死")
         job_id = uuid.uuid4().hex
-        _dd_job.update(running=True, job_id=job_id, stock=stock, error=None,
+        _state()._dd_job.update(running=True, job_id=job_id, stock=stock, error=None,
                        started=time.time(), elapsed=0, finished_at=None)
-    threading.Thread(target=_run_dd, args=(stock, job_id), daemon=True).start()
+    account_context.thread(target=_run_dd, args=(stock, job_id), daemon=True).start()
     return {"running": True, "busy": False, "stock": stock, "job_id": job_id}
 
 
 @app.get("/api/deepdive/status")
 def api_dd_status():
     with _lock:
-        snap = dict(_dd_job)
+        snap = dict(_state()._dd_job)
     if snap["running"] and snap["started"]:
         snap["elapsed"] = int(time.time() - snap["started"])
     snap.pop("started", None)
@@ -1706,7 +1737,7 @@ def api_dd_status():
 
 @app.get("/api/deepdive/latest")
 def api_dd_latest():
-    path = os.path.join(_DD_DIR, "latest.json")
+    path = os.path.join(account_context.path(_DD_DIR), "latest.json")
     if not os.path.exists(path):
         return JSONResponse({}, status_code=200)
     try:
@@ -1717,7 +1748,7 @@ def api_dd_latest():
 
 
 def _deepdive_context() -> str:
-    d = sharing_worker.shared_review(kind="deepdive") if sharing_worker.ENABLED else _load_latest_json(_DD_DIR)
+    d = sharing_worker.shared_review(kind="deepdive") if sharing_worker.ENABLED else _load_latest_json(account_context.path(_DD_DIR))
     if not d:
         return "（暂无个股深挖数据，请先在个股深挖 Agent 深挖一只票。）"
     parts = [f"标的 {d.get('name', '')}（{d.get('code', '')}）", f"【深挖结论】\n{d.get('verdict_md', '')}"]
@@ -1822,7 +1853,7 @@ def _start_intraday() -> None:
                 return          # 该版本不含开盘核验，安静跳过
             print(f"⚠️ 盘中调度未启动：导入 intraday 失败（{type(exc).__name__}: {exc}）")
             return
-        t = threading.Thread(target=_intraday_scheduler, daemon=True)
+        t = account_context.thread(target=_intraday_scheduler, daemon=True)
         t.start()
         _intraday_thread_started = True  # ⚠️ 只在 start() 成功之后才置位
 
@@ -1831,11 +1862,37 @@ def _start_intraday() -> None:
 # 盘中快照全天不抓，而界面上看不出任何异样）。
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
+    if account_context.ENABLED:
+        _app.state.review_agents = {}
+        publication_stop = threading.Event()
+        sharing_worker.start_publication_sync(publication_stop)
+        try:
+            _start_intraday()  # Public market snapshots use the shared cache.
+            yield
+        finally:
+            publication_stop.set()
+            from sharing import connect, DB
+            with connect() as db:
+                users = [dict(row) for row in db.execute("SELECT * FROM users")]
+            for user in users:
+                if not (DB.parent / "homes" / user["id"]).is_dir():
+                    continue
+                with account_context.bind(user, DB.parent / "homes"):
+                    manager = _app.state.review_agents.get(user["id"])
+                    if manager:
+                        manager.shutdown()
+                    process = _state()._codex_login["process"]
+                    if process:
+                        _terminate_codex_login(process)
+                    import watchtower
+                    watchtower.stop()
+            _app.state.review_agents = {}
+        return
     # Acquire the process reservation at server startup, never on module import.
     # Imports/reloads used by existing tools and tests must remain side-effect free
     # with respect to the new Agent's worker and private database.
-    manager = ReviewAgentManager(ReviewAgentStore(_REVIEW_AGENT_ROOT), Path(_REVIEW_DIR),
-                                 ReviewAgentRuntime(_REVIEW_AGENT_ROOT))
+    manager = ReviewAgentManager(ReviewAgentStore(account_context.path(_REVIEW_AGENT_ROOT)), Path(account_context.path(_REVIEW_DIR)),
+                                 ReviewAgentRuntime(account_context.path(_REVIEW_AGENT_ROOT)))
     if sharing_worker.ENABLED:
         sharing_worker.prepare_agent(manager.runtime)
     _app.state.review_agent = manager
@@ -1848,7 +1905,7 @@ async def _lifespan(_app: FastAPI):
     finally:
         publication_stop.set()
         with _codex_login_lock:
-            process = _codex_login["process"]
+            process = _state()._codex_login["process"]
         if process is not None:
             _terminate_codex_login(process)
         manager.shutdown()

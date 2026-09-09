@@ -32,6 +32,7 @@
 """
 
 from __future__ import annotations
+import account_context
 
 import json
 import os
@@ -63,10 +64,10 @@ _MIN_DAYS = 5
 # ---------------------------------------------------------------- 制度日历
 def load_calendar() -> list[dict]:
     """已登记的制度变化。**只读用户手工登记的，不自动推断。**"""
-    if not os.path.isfile(_CAL_PATH):
+    if not os.path.isfile(account_context.path(_CAL_PATH)):
         return []
     try:
-        with open(_CAL_PATH, encoding="utf-8") as fh:
+        with open(account_context.path(_CAL_PATH), encoding="utf-8") as fh:
             env = json.load(fh)
         if env.get("schema") == _CAL_SCHEMA and isinstance(env.get("events"), list):
             return sorted(env["events"], key=lambda e: e.get("date") or "")
@@ -85,8 +86,8 @@ def save_calendar(events: list[dict]) -> dict:
             raise ValueError("每条制度事件都要有日期和标题")
         clean.append({"date": _valid_date(d), "title": title[:120],
                       "note": str((e or {}).get("note") or "").strip()[:500]})
-    os.makedirs(_DIR, exist_ok=True)
-    if not atomic_write_json(_CAL_PATH, {"schema": _CAL_SCHEMA, "events": clean}):
+    os.makedirs(account_context.path(_DIR), exist_ok=True)
+    if not atomic_write_json(account_context.path(_CAL_PATH), {"schema": _CAL_SCHEMA, "events": clean}):
         raise RuntimeError("制度日历写入失败")
     return {"ok": True, "count": len(clean)}
 

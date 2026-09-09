@@ -1,8 +1,4 @@
-"""Operator-only worker provisioning. The website issues invites from prepared slots.
-
-Run this inside the app image with the gateway data volume mounted. The generated
-Compose file starts one isolated worker per invited account, using the same image.
-"""
+"""Operator commands for the shared application and explicit legacy home import."""
 from __future__ import annotations
 
 import argparse
@@ -11,6 +7,9 @@ import os
 from pathlib import Path
 import re
 import secrets
+import shutil
+import stat
+import tempfile
 import uuid
 
 import sharing
@@ -26,52 +25,76 @@ def provision(username: str, *, owner: bool = False) -> str:
             raise ValueError("管理员已经存在")
         db.execute("""INSERT INTO users (id, username, salt, invite, worker, worker_key, admin)
             VALUES (?, ?, ?, ?, ?, ?, ?)""", (uid, username, secrets.token_hex(16), sharing.digest(invite),
-                 "http://worker-" + uid + ":8910", secrets.token_urlsafe(32), int(owner)))
+                 "", secrets.token_urlsafe(32), int(owner)))
     return invite
 
 
 def manifest(port: int, secure: bool) -> dict:
-    with sharing.connect() as db:
-        users = [dict(r) for r in db.execute("SELECT * FROM users WHERE enabled=1")]
     common = {"image": "vibe-astock-shared:local", "restart": "unless-stopped", "read_only": True,
               "security_opt": ["no-new-privileges:true"], "cap_drop": ["ALL"], "pids_limit": 256,
               "tmpfs": ["/tmp:uid=1000,gid=1000,mode=1777,size=268435456"],
               "healthcheck": {"test": ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8910/api/health', timeout=5)"],
                               "interval": "30s", "timeout": "10s", "start_period": "60s", "retries": 3}}
-    networks = {"account-" + u["id"]: {} for u in users}
-    services = {"gateway": {**common, "command": ["python", "-m", "uvicorn", "sharing:app", "--host", "0.0.0.0", "--port", "8910"],
-                           "ports": [f"127.0.0.1:{port}:8910"], "volumes": ["accounts:/home/app/sharing"],
-                           "environment": {"VIBE_COOKIE_SECURE": "1" if secure else "0"},
-                           "networks": list(networks), "mem_limit": "512m"}}
-    volumes = {"accounts": {"external": True, "name": "vibe-astock-accounts"}}
-    for u in users:
-        volume = "home-" + u["id"]
-        volumes[volume] = {"name": "vibe-astock-shared-" + u["id"]}
-        services["worker-" + u["id"]] = {**common,
-            "volumes": [volume + ":/home/app"], "networks": ["account-" + u["id"]],
-            "tmpfs": [*common["tmpfs"], "/app/vr/.cache:uid=1000,gid=1000,mode=0700,size=268435456"],
-            "mem_limit": "3g", "cpus": 2,
-            "environment": {"VIBE_WORKER_KEY": u["worker_key"], "VR_API_KEY": u["worker_key"],
-                "VIBE_GATEWAY": "http://gateway:8910", "CODEX_HOME": "/home/app/.codex",
-                "VIBE_ALLOW_UNSAFE_CLI": "codex", "VIBE_IMPORT_REVIEWS": "1" if u["admin"] else "0"}}
-    return {"name": "vibe-astock-shared", "services": services, "volumes": volumes, "networks": networks}
+    service = {**common, "command": ["python", "-m", "uvicorn", "sharing:app", "--host", "0.0.0.0", "--port", "8910"],
+               "ports": [f"127.0.0.1:{port}:8910"], "volumes": ["accounts:/home/app/sharing"],
+               "tmpfs": [*common["tmpfs"], "/app/vr/.cache:uid=1000,gid=1000,mode=0700,size=268435456"],
+               "environment": {"VIBE_COOKIE_SECURE": "1" if secure else "0", "VIBE_SHARED_APP": "1",
+                               "VIBE_ALLOW_UNSAFE_CLI": "codex", "HOME": "/home/app/sharing/service"}, "mem_limit": "3g", "cpus": 2}
+    return {"name": "vibe-astock-shared", "services": {"gateway": service},
+            "volumes": {"accounts": {"external": True, "name": "vibe-astock-accounts"}}}
 
 
-def add_slots(count: int):
-    if not 1 <= count <= 20:
-        raise ValueError("每次可补充 1–20 个名额")
-    for _ in range(count):
-        name = "slot_" + secrets.token_hex(10)
-        provision(name)
-        with sharing.connect() as db:
-            db.execute("UPDATE users SET invite=NULL WHERE username=?", (name,))
-            db.execute("INSERT INTO invitation_slots SELECT id FROM users WHERE username=?", (name,))
+def _plain_path(path: Path):
+    for entry in (path, *path.parents):
+        if entry.is_symlink() or (hasattr(entry, "is_junction") and entry.is_junction()):
+            raise ValueError("迁移路径不能包含符号链接或目录联接")
+
+
+def _plain_tree(path: Path):
+    _plain_path(path)
+    if not path.is_dir():
+        raise ValueError("旧 home 必须是已存在的目录")
+    for parent, directories, files in os.walk(path, followlinks=False):
+        for name in directories + files:
+            entry = Path(parent) / name
+            _plain_path(entry)
+            mode = entry.lstat().st_mode
+            if not (stat.S_ISDIR(mode) or stat.S_ISREG(mode)):
+                raise ValueError("旧 home 只能包含普通文件和目录")
+
+
+def import_home(username: str, source: Path) -> Path:
+    """Copy an offline, read-only legacy home; never merge or alter its source."""
+    with sharing.connect() as db:
+        row = db.execute("SELECT id FROM users WHERE username=?", (username,)).fetchone()
+    if not row or not re.fullmatch(r"[0-9a-f]{32}", row["id"]):
+        raise ValueError("账号不存在或账号编号无效")
+    source = Path(source).absolute()
+    _plain_tree(source)
+    root = sharing.DB.absolute().parent / "homes"
+    _plain_path(root)
+    target = root / row["id"]
+    if target.exists() or target.is_symlink():
+        raise ValueError("本人账号空间已存在，拒绝覆盖或合并")
+    if root.is_relative_to(source) or source.is_relative_to(target):
+        raise ValueError("源目录与目标账号空间不能嵌套")
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with tempfile.TemporaryDirectory(prefix=".import-", dir=root) as temporary:
+        staged = Path(temporary) / "home"
+        shutil.copytree(source, staged, symlinks=True)
+        _plain_tree(staged)
+        staged.chmod(0o700)
+        if target.exists() or target.is_symlink():
+            raise ValueError("本人账号空间已存在，拒绝覆盖或合并")
+        staged.rename(target)
+    return target
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=["add-user", "add-slots", "reset-invite", "disable", "render"])
+    parser.add_argument("action", choices=["add-user", "reset-invite", "disable", "render", "import-home"])
     parser.add_argument("username", nargs="?")
+    parser.add_argument("--source", type=Path, help="import-home 的只读旧 home 目录")
     parser.add_argument("--owner", action="store_true")
     parser.add_argument("--port", type=int, default=8910)
     parser.add_argument("--local-http", action="store_true", help="仅本机 HTTP 测试；公网 HTTPS 不要设置")
@@ -79,13 +102,20 @@ def main():
     args = parser.parse_args()
     if not 1 <= args.port <= 65535:
         parser.error("端口无效")
+    if args.action == "import-home":
+        if not args.username or not args.source:
+            parser.error("import-home 需要账号和 --source；先停止新旧应用的写入")
+        try:
+            import_home(args.username, args.source)
+        except (ValueError, OSError):
+            parser.error("导入失败：检查账号、目录权限、链接及目标是否已存在；原件保持不变")
+        print("本人账号数据已复制；旧数据保持不变。")
+        return
     output = Path(args.output)
     output.mkdir(parents=True, exist_ok=True)
     invite = None
     if args.action == "add-user":
         invite = provision(args.username or "", owner=args.owner)
-    elif args.action == "add-slots":
-        add_slots(int(args.username or "5"))
     elif args.action in {"reset-invite", "disable"}:
         with sharing.connect() as db:
             row = db.execute("SELECT id FROM users WHERE username=?", (args.username,)).fetchone()

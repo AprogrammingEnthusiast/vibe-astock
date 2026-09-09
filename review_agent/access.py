@@ -1,5 +1,6 @@
 """Product-owned OAuth and real model probes. No developer credentials are read."""
 from __future__ import annotations
+import account_context
 
 import json
 import os
@@ -95,7 +96,7 @@ class Access:
                 self._persist()
             target = self._login if kind == "login" else self._probe
             args = () if kind == "login" else (source, key)
-            self.worker = threading.Thread(target=self._work, args=(target, args), daemon=True)
+            self.worker = account_context.thread(target=self._work, args=(target, args), daemon=True)
             self.worker.start()
             return dict(self.state)
 
@@ -154,7 +155,7 @@ class Access:
                         except queue.Full:
                             pass
 
-            thread = threading.Thread(target=reader, daemon=True)
+            thread = account_context.thread(target=reader, daemon=True)
             thread.start()
 
             def send(method, params=None, request_id=None):
@@ -186,11 +187,11 @@ class Access:
                         raise EvidenceError("登录请求失败，请检查网络后重试")
                     if event.get("id") == 1:
                         send("initialized")
-                        send("account/login/start", {"type": "chatgptDeviceCode" if os.environ.get("VIBE_WORKER_KEY") else "chatgpt"}, 2)
+                        send("account/login/start", {"type": "chatgptDeviceCode" if account_context.ENABLED or os.environ.get("VIBE_WORKER_KEY") else "chatgpt"}, 2)
                     elif event.get("id") == 2:
                         result = event["result"]
                         login_id = result["loginId"]
-                        if os.environ.get("VIBE_WORKER_KEY"):
+                        if account_context.ENABLED or os.environ.get("VIBE_WORKER_KEY"):
                             code = result.get("userCode")
                             if not isinstance(code, str) or not re.fullmatch(r"[A-Z0-9-]{6,20}", code):
                                 raise EvidenceError("设备登录验证码格式无效，请重试")

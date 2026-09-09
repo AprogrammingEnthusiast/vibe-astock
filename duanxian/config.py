@@ -57,7 +57,8 @@ def _ensure_mimo_loaded() -> None:
 
 def make_llm(deep: bool = False, temperature: float = 0.6):
     """构造复盘用的 LLM"""
-    if os.environ.get("VIBE_WORKER_KEY"):
+    import account_context
+    if account_context.ENABLED or os.environ.get("VIBE_WORKER_KEY"):
         from sharing_worker import make_llm as personal_llm
         return personal_llm(temperature)
     kind = cli_llm.wanted_kind()

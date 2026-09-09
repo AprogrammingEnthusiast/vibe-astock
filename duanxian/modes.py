@@ -23,6 +23,7 @@
 """
 
 from __future__ import annotations
+import account_context
 
 import json
 import os
@@ -50,10 +51,10 @@ _VERSIONED_FIELDS = _TEXT_FIELDS + ("playbook",)
 
 
 def _load_env() -> dict:
-    if not os.path.isfile(_PATH):
+    if not os.path.isfile(account_context.path(_PATH)):
         return {"schema": _SCHEMA, "cards": []}
     try:
-        with open(_PATH, encoding="utf-8") as fh:
+        with open(account_context.path(_PATH), encoding="utf-8") as fh:
             env = json.load(fh)
         if env.get("schema") == _SCHEMA and isinstance(env.get("cards"), list):
             return env
@@ -149,8 +150,8 @@ def delete_card(card_id: str) -> dict:
 
 
 def _save(env: dict, cards: list[dict]) -> list[dict]:
-    os.makedirs(_DIR, exist_ok=True)
-    if not atomic_write_json(_PATH, {"schema": _SCHEMA, "cards": cards}):
+    os.makedirs(account_context.path(_DIR), exist_ok=True)
+    if not atomic_write_json(account_context.path(_PATH), {"schema": _SCHEMA, "cards": cards}):
         raise RuntimeError("模式卡写入失败")
     return cards
 

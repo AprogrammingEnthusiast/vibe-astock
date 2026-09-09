@@ -11,6 +11,24 @@
 """
 
 from __future__ import annotations
+import account_context
+
+
+def _state():
+    import sys
+    return account_context.state(sys.modules[__name__], lambda: {
+        '_wake': threading.Event(),
+        '_stop': threading.Event(),
+        '_thread': None,
+        '_extra_watch': [],
+        '_frames': {},
+        '_limit_state': {},
+        '_alerts': [],
+        '_alert_last': {},
+        '_snapshot': {},
+        '_turnover_saved_date': "",
+        '_watch_clients': {},
+    })
 
 import json
 import os
@@ -39,6 +57,7 @@ FRAME_KEEP = 120          # 每只票保留帧数（120 帧 ≈ 6 分钟）
 
 _lock = threading.Lock()
 _wake = threading.Event()   # 录入持仓/改自选后唤醒线程立即重建快照
+_stop = threading.Event()
 _thread: threading.Thread | None = None
 _extra_watch: list[str] = []      # 前端传入的自选股
 _frames: dict[str, deque] = {}    # code -> deque[(ts, price, amount)]
@@ -134,11 +153,11 @@ def _bigcaps() -> list[dict]:
             out.append({"code": str(p.get("f12", "")), "name": p.get("f14", "")})
         if stop:
             break
-    file = _DATA_DIR / "bigcaps.json"
+    file = account_context.path(_DATA_DIR) / "bigcaps.json"
     if out:
         _bigcaps_cache = (today, out)
         try:
-            _DATA_DIR.mkdir(parents=True, exist_ok=True)
+            account_context.path(_DATA_DIR).mkdir(parents=True, exist_ok=True)
             file.write_text(json.dumps({"date": today, "stocks": out}, ensure_ascii=False))
         except Exception:  # noqa: BLE001
             pass
@@ -152,7 +171,7 @@ def _bigcaps() -> list[dict]:
 
 
 def _turnover_file() -> Path:
-    return _DATA_DIR / "turnover_top.json"
+    return account_context.path(_DATA_DIR) / "turnover_top.json"
 
 
 def _turnover_top10_live() -> list[dict]:
@@ -182,16 +201,16 @@ def _turnover_yesterday() -> tuple[str, list[dict]]:
 
 def _save_turnover_snapshot() -> None:
     """收盘后存当日成交前十快照，供次日作「昨日前十」。每天存一次。"""
-    global _turnover_saved_date
+    pass
     today = datetime.now(BEIJING).strftime("%Y%m%d")
-    if _turnover_saved_date == today:
+    if _state()._turnover_saved_date == today:
         return
     live = _turnover_top10_live()
     if live:
         try:
-            _DATA_DIR.mkdir(parents=True, exist_ok=True)
+            account_context.path(_DATA_DIR).mkdir(parents=True, exist_ok=True)
             _turnover_file().write_text(json.dumps({"date": today, "stocks": live}, ensure_ascii=False))
-            _turnover_saved_date = today
+            _state()._turnover_saved_date = today
         except Exception:  # noqa: BLE001
             pass
 
@@ -207,9 +226,9 @@ def _market_phase() -> str:
 def _emit(code: str, name: str, kind: str, msg: str, sources: list[str], change_pct: float | None = None) -> None:
     key = (code, kind)
     now = time.time()
-    if now - _alert_last.get(key, 0) < ALERT_COOLDOWN:
+    if now - _state()._alert_last.get(key, 0) < ALERT_COOLDOWN:
         return
-    _alert_last[key] = now
+    _state()._alert_last[key] = now
     evt = {
         "ts": datetime.now(BEIJING).strftime("%H:%M:%S"),
         "code": code,
@@ -218,12 +237,12 @@ def _emit(code: str, name: str, kind: str, msg: str, sources: list[str], change_
         "msg": msg,
         "sources": sources,
     }
-    _alerts.insert(0, evt)
-    del _alerts[500:]
+    _state()._alerts.insert(0, evt)
+    del _state()._alerts[500:]
     try:  # 当日事件落盘（收盘复盘）
-        _DATA_DIR.mkdir(parents=True, exist_ok=True)
+        account_context.path(_DATA_DIR).mkdir(parents=True, exist_ok=True)
         day = datetime.now(BEIJING).strftime("%Y%m%d")
-        with open(_DATA_DIR / f"alerts-{day}.jsonl", "a", encoding="utf-8") as f:
+        with open(account_context.path(_DATA_DIR) / f"alerts-{day}.jsonl", "a", encoding="utf-8") as f:
             f.write(json.dumps(evt, ensure_ascii=False) + "\n")
     except Exception:  # noqa: BLE001
         pass
@@ -231,7 +250,7 @@ def _emit(code: str, name: str, kind: str, msg: str, sources: list[str], change_
 
 def _detect(code: str, q: dict, sources: list[str]) -> None:
     now = time.time()
-    frames = _frames.setdefault(code, deque(maxlen=FRAME_KEEP))
+    frames = _state()._frames.setdefault(code, deque(maxlen=FRAME_KEEP))
     frames.append((now, q["price"], q["amount"]))
 
     # 规则① 急拉/急跳水：SURGE_WINDOW 秒窗口首尾涨跌幅
@@ -246,13 +265,13 @@ def _detect(code: str, q: dict, sources: list[str]) -> None:
     # 规则② 触板/开板（涨停价来自行情快照，含北交所 30cm）
     if q["zt_price"] > 0:
         is_limit = q["price"] >= q["zt_price"] - 1e-6
-        was_limit = _limit_state.get(code)
+        was_limit = _state()._limit_state.get(code)
         if was_limit is not None:
             if is_limit and not was_limit:
                 _emit(code, q["name"], "封板", f"触及涨停 {q['zt_price']}", sources)
             elif was_limit and not is_limit:
                 _emit(code, q["name"], "开板", f"涨停打开（现价 {q['price']}，今日 {q['pct']:+.1f}%）", sources)
-        _limit_state[code] = is_limit
+        _state()._limit_state[code] = is_limit
 
 
 # ---------------------------------------------------------------- 主循环
@@ -305,7 +324,7 @@ def _build_snapshot(quotes: dict, holdings: list[dict], watch: list[str],
         "lianban3": lianban_rows,
         "yesterday_ladder": previous_ladder.render_cohort(cohort or {}, quotes, phase=phase),
         "turnover": {"label": turnover_label, "stocks": [row(t["code"]) for t in turnover]},
-        "alerts": _alerts[:120],
+        "alerts": _state()._alerts[:120],
     }
 
 
@@ -325,7 +344,7 @@ def _refresh_previous_cohort(wall_day: str) -> None:
                 and previous.get("quote_date") == quote_day):
             result = {**previous, "warning": "昨日名单刷新失败，保留同一行情交易日已确认的样本；行情仍独立更新。"}
         _previous_cache = (time.monotonic(), wall_day, result)
-    _wake.set()
+    _state()._wake.set()
 
 
 def _previous_cohort() -> dict:
@@ -342,7 +361,7 @@ def _previous_cohort() -> dict:
         if current and time.monotonic() - stamp < 120:
             return result
         if _previous_worker is None or not _previous_worker.is_alive():
-            _previous_worker = threading.Thread(target=_refresh_previous_cohort,
+            _previous_worker = account_context.thread(target=_refresh_previous_cohort,
                                                 args=(wall_day,), name="yesterday-cohort", daemon=True)
             _previous_worker.start()
         if current and result.get("available"):
@@ -352,14 +371,14 @@ def _previous_cohort() -> dict:
 
 
 def _loop() -> None:
-    global _snapshot
+    pass
     alert_day = None
-    while True:
+    while not _state()._stop.is_set():
         _expire_watch_clients()
         phase = _market_phase()
         today = datetime.now(BEIJING).strftime("%Y%m%d")
         if today != alert_day:
-            _alerts.clear(); _frames.clear(); _limit_state.clear()
+            _state()._alerts.clear(); _state()._frames.clear(); _state()._limit_state.clear()
             alert_day = today
         if phase == "closed" and datetime.now(BEIJING).strftime("%H:%M") >= "15:05":
             from duanxian.trade_calendar import quote_trade_day
@@ -375,7 +394,7 @@ def _loop() -> None:
                 holdings = []
                 holdings_error = "持仓读取失败，未展示旧账替代数据；请在我的股票检查交易日志。"
             with _lock:
-                watch = list(_extra_watch)
+                watch = list(_state()._extra_watch)
             bigcaps = _bigcaps()
             cohort = _previous_cohort()
             lianban = [s for s in cohort.get("stocks", []) if s["boards"] >= 3]
@@ -403,32 +422,40 @@ def _loop() -> None:
                         _detect(code, q, pool[code])
             else:
                 # 竞价/午休的报价不进入连续交易的急拉与开板比较基准。
-                _frames.clear()
-                _limit_state.clear()
-            _snapshot = _build_snapshot(quotes, holdings, watch, bigcaps, lianban,
+                _state()._frames.clear()
+                _state()._limit_state.clear()
+            _state()._snapshot = _build_snapshot(quotes, holdings, watch, bigcaps, lianban,
                                         turnover_label, turnover, phase, cohort, holdings_error)
         except Exception:  # noqa: BLE001  数据源抖动不杀线程，下一轮重试
             pass
-        _wake.wait(POLL_SECONDS if phase == "open" else 20)
-        _wake.clear()
+        _state()._wake.wait(POLL_SECONDS if phase == "open" else 20)
+        _state()._wake.clear()
 
 
 def ensure_started() -> None:
-    global _thread
-    if _thread is None or not _thread.is_alive():
-        _thread = threading.Thread(target=_loop, name="watchtower", daemon=True)
-        _thread.start()
+    with _lock:
+        if _state()._thread is None or not _state()._thread.is_alive():
+            _state()._stop.clear()
+            _state()._thread = account_context.thread(target=_loop, name="watchtower", daemon=True)
+            _state()._thread.start()
+
+
+def stop():
+    _state()._stop.set()
+    _state()._wake.set()
+    if _state()._thread:
+        _state()._thread.join(timeout=5)
 
 
 def poke() -> None:
     """外部数据变化（录入持仓/改自选）后唤醒线程，立即重建快照。"""
-    _wake.set()
+    _state()._wake.set()
 
 
 _watch_clients: dict[str, tuple[float, list[str]]] = {}
 
 def set_client_watch(client_id: str, codes: list[str]) -> None:
-    global _extra_watch
+    pass
     if not isinstance(client_id, str) or not re.fullmatch(r"[a-f0-9]{32}", client_id):
         raise ValueError("监控客户端编号无效")
     if not isinstance(codes, list) or len(codes) > 100 or any(not isinstance(c, str) or not re.fullmatch(r"\d{6}", c) for c in codes):
@@ -436,30 +463,30 @@ def set_client_watch(client_id: str, codes: list[str]) -> None:
     _expire_watch_clients()
     with _lock:
         now = time.monotonic()
-        if client_id not in _watch_clients and len(_watch_clients) >= 32:
+        if client_id not in _state()._watch_clients and len(_state()._watch_clients) >= 32:
             raise ValueError("同时监控页面过多，请关闭不用的页面")
-        candidate = {**_watch_clients, client_id: (now, list(dict.fromkeys(codes)))}
+        candidate = {**_state()._watch_clients, client_id: (now, list(dict.fromkeys(codes)))}
         clean = list(dict.fromkeys(c for _, group in candidate.values() for c in group))
         if len(clean) > 300:
             raise ValueError("全部监控页面合计最多300只，请关闭不用的页面或缩减自选")
-        _watch_clients[client_id] = candidate[client_id]
-        changed = clean != _extra_watch
-        _extra_watch = clean
+        _state()._watch_clients[client_id] = candidate[client_id]
+        changed = clean != _state()._extra_watch
+        _state()._extra_watch = clean
     if changed:
         poke()
 
 
 def _expire_watch_clients() -> None:
-    global _extra_watch
+    pass
     with _lock:
-        expired = [key for key, (stamp, _) in _watch_clients.items() if time.monotonic() - stamp > 120]
+        expired = [key for key, (stamp, _) in _state()._watch_clients.items() if time.monotonic() - stamp > 120]
         if expired:
             for key in expired:
-                del _watch_clients[key]
-            _extra_watch = list(dict.fromkeys(c for _, group in _watch_clients.values() for c in group))
+                del _state()._watch_clients[key]
+            _state()._extra_watch = list(dict.fromkeys(c for _, group in _state()._watch_clients.values() for c in group))
 
 
 def get_snapshot() -> dict:
-    return _snapshot or {"warming_up": True, "ts": "", "phase": _market_phase(), "poll_seconds": POLL_SECONDS,
+    return _state()._snapshot or {"warming_up": True, "ts": "", "phase": _market_phase(), "poll_seconds": POLL_SECONDS,
                          "holdings": [], "watchlist": [], "bigcap": {"total": 0, "top": []},
                          "lianban3": [], "turnover": {"label": "", "stocks": []}, "alerts": []}

@@ -138,9 +138,10 @@ export async function fetchApiModels(
   baseURL: string,
   apiKey: string,
   headers: Record<string, string> = {},
+  signal?: AbortSignal,
 ): Promise<string[]> {
   const r = await fetch(apiUrl("/api/ai/models"), {
-    method: "POST",
+    method: "POST", signal,
     headers: { "Content-Type": "application/json", ...headers },
     body: JSON.stringify({ baseURL, apiKey }),
   });

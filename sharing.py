@@ -1,8 +1,4 @@
-"""Authenticated website gateway. Private APIs go only to the account's worker.
-
-Workers never share a home directory. Only completed market reviews are published
-to this gateway; neither browsing nor publication invokes an LLM.
-"""
+"""One authenticated application; private requests run in the session's account context."""
 from __future__ import annotations
 
 import hashlib
@@ -14,19 +10,36 @@ import re
 import secrets
 import sqlite3
 import time
+import uuid
+from contextlib import asynccontextmanager
 from urllib.parse import urlparse
 
-import requests
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from starlette.concurrency import run_in_threadpool
+import account_context
 
 DB = Path(os.environ.get("VIBE_ACCOUNTS_DB", "/home/app/sharing/accounts.sqlite3"))
 DIST = Path(__file__).parent / "frontend" / "dist"
 COOKIE = "vibe_session"
 SESSION_SECONDS = 30 * 86400
 MAX_BODY = 2 * 1024 * 1024
-app = FastAPI(title="Vibe-Astock · shared research")
+@asynccontextmanager
+async def lifespan(app):
+    if account_context.ENABLED:
+        with connect() as db:
+            legacy = db.execute("SELECT id FROM users WHERE worker!='' AND enabled=1 AND id NOT IN (SELECT user_id FROM invitation_slots)").fetchall()
+        if any(not (DB.parent / "homes" / row["id"]).is_dir() for row in legacy):
+            raise RuntimeError("请先使用 import-home 导入已有成员数据，再启动单应用服务；旧数据未修改")
+        import server
+        app.state.backend = server.app
+        async with server.app.router.lifespan_context(server.app):
+            yield
+    else:
+        yield
+
+
+app = FastAPI(title="Vibe-Astock · shared research", lifespan=lifespan)
 
 
 def digest(value: str) -> str:
@@ -213,6 +226,10 @@ async def watchlist(request: Request):
 async def publish(request: Request):
     u = user_for(request, worker=True)
     body = await json_body(request)
+    return publish_for(u, body)
+
+
+def publish_for(u: dict, body: dict):
     deepdive = body.get("run_type") == "stock_deepdive"
     kind = "deepdive" if deepdive else "review"
     date = body.get("trade_date" if deepdive else "target_date", "")
@@ -230,6 +247,8 @@ async def publish(request: Request):
     payload = json.dumps(public_payload(body), ensure_ascii=False, sort_keys=True)
     version = digest(u["id"] + payload)
     with connect() as db:
+        if not db.execute("SELECT 1 FROM users WHERE id=? AND enabled=1", (u["id"],)).fetchone():
+            raise HTTPException(401, "账号已停用")
         db.execute("INSERT OR IGNORE INTO reviews VALUES (?, ?, ?, ?, ?, ?, ?)",
                    (version, u["id"], date, time.time(), payload, kind, body.get("code", "") if deepdive else ""))
     return {"id": version}
@@ -246,8 +265,7 @@ def admin_for(request: Request):
 def invitation_list(request: Request):
     admin_for(request)
     with connect() as db:
-        return {"available": db.execute("SELECT count(*) FROM invitation_slots").fetchone()[0],
-                "members": [{"username": r["username"], "admin": bool(r["admin"]),
+        return {"members": [{"username": r["username"], "admin": bool(r["admin"]),
                              "status": "active" if r["password"] else "invited"} for r in db.execute(
                     "SELECT username, admin, password FROM users WHERE enabled=1 AND id NOT IN (SELECT user_id FROM invitation_slots) ORDER BY admin DESC, username")]}
 
@@ -262,31 +280,11 @@ async def invite_member(request: Request):
 
 
 def issue_invite(username: str):
-    # ponytail: prestarted private workers cover a small friend group; refill slots with the operator CLI.
-    # The public gateway never receives Docker control privileges.
-    with connect() as db:
-        if db.execute("SELECT 1 FROM users WHERE username=?", (username,)).fetchone():
-            raise HTTPException(409, "账号已存在，请使用其他名称")
-        slots = [dict(r) for r in db.execute("SELECT u.* FROM users u JOIN invitation_slots s ON u.id=s.user_id WHERE u.enabled=1")]
-    if not slots:
-        raise HTTPException(409, "可邀请名额已用完，请先补充账号名额")
-    for slot in slots:
-        try:
-            response = requests.get(slot["worker"] + "/api/health", headers={"Host": "localhost"}, timeout=2, allow_redirects=False)
-            if response.status_code == 200:
-                break
-        except requests.RequestException:
-            pass
-    else:
-        raise HTTPException(503, "正在准备成员空间，请稍后重试；尚未生成邀请码")
     invite = secrets.token_urlsafe(32)
     try:
         with connect() as db:
-            db.execute("BEGIN IMMEDIATE")
-            if not db.execute("DELETE FROM invitation_slots WHERE user_id=?", (slot["id"],)).rowcount:
-                raise HTTPException(409, "名额刚被使用，请重新生成")
-            db.execute("UPDATE users SET username=?, invite=? WHERE id=? AND password IS NULL",
-                       (username, digest(invite), slot["id"]))
+            db.execute("INSERT INTO users (id, username, salt, invite, worker, worker_key) VALUES (?, ?, ?, ?, '', ?)",
+                       (uuid.uuid4().hex, username, secrets.token_hex(16), digest(invite), secrets.token_urlsafe(32)))
     except sqlite3.IntegrityError:
         raise HTTPException(409, "账号已存在，请使用其他名称")
     return {"username": username, "invite": invite}
@@ -350,23 +348,31 @@ def health():
     return {"ok": True, "service": "vibe-sharing"}
 
 
-def forward(u: dict, method: str, path: str, query: str, content: bytes, content_type: str):
-    # The worker address comes exclusively from operator-provisioned records.
-    try:
-        upstream = requests.request(method, u["worker"] + "/api/" + path,
-            params=query, data=content,
-            headers={"X-Vibe-Worker": u["worker_key"], "Authorization": "Bearer " + u["worker_key"],
-                     "Content-Type": content_type, "Host": "localhost"}, timeout=(5, 330), stream=True, allow_redirects=False)
-    except requests.RequestException:
-        raise HTTPException(503, "你的工作实例暂时不可用，请稍后重试")
+class AccountResponse(Response):
+    """Delegate directly to the same process, retaining identity through streaming."""
+    def __init__(self, user, content):
+        super().__init__()
+        self.user, self.content = user, content
 
-    def chunks():
-        try:
-            yield from upstream.iter_content(chunk_size=1024)
-        finally:
-            upstream.close()
-    return StreamingResponse(chunks(), status_code=upstream.status_code,
-                             media_type=upstream.headers.get("Content-Type", "application/json"))
+    async def __call__(self, scope, receive, send):
+        backend = getattr(app.state, "backend", None)
+        if backend is None:
+            return await JSONResponse({"detail": "服务尚未启动"}, status_code=503)(scope, receive, send)
+        # External identity, host and credentials never reach the private router.
+        headers = [(k, v) for k, v in scope["headers"] if k.lower() in {b"content-type", b"accept"}]
+        headers.append((b"host", b"localhost"))
+        private_scope = {**scope, "headers": headers}
+        pending = True
+
+        async def body():
+            nonlocal pending
+            if pending:
+                pending = False
+                return {"type": "http.request", "body": self.content, "more_body": False}
+            return await receive()
+
+        with account_context.bind(self.user, DB.parent / "homes"):
+            await backend(private_scope, body, send)
 
 
 @app.api_route("/api/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])
@@ -374,8 +380,7 @@ async def private_api(path: str, request: Request):
     u = user_for(request)
     if any(p in {".", ".."} for p in path.split("/")) or "\\" in path:
         raise HTTPException(400, "路径无效")
-    return await run_in_threadpool(forward, u, request.method, path, request.url.query,
-                                   await body_bytes(request), request.headers.get("content-type", "application/json"))
+    return AccountResponse(u, await body_bytes(request))
 
 
 @app.get("/{path:path}")

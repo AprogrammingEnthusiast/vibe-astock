@@ -1,6 +1,7 @@
 """复盘产物的读写 —— server 和 `main.py` 共用这一份"""
 
 from __future__ import annotations
+import account_context
 
 import html
 import json
@@ -78,8 +79,8 @@ _SAVE_MUTEX = threading.RLock()
 @contextmanager
 def _save_lock():
     """One owner across API threads and CLI processes, released on crash."""
-    os.makedirs(DIR, exist_ok=True)
-    with _SAVE_MUTEX, open(os.path.join(DIR, ".save.lock"), "a+b") as lock:
+    os.makedirs(account_context.path(DIR), exist_ok=True)
+    with _SAVE_MUTEX, open(os.path.join(account_context.path(DIR), ".save.lock"), "a+b") as lock:
         if os.name == "posix":
             import fcntl
             fcntl.flock(lock, fcntl.LOCK_EX)
@@ -107,9 +108,9 @@ def save(payload: dict, date: str) -> SaveResult:
 
 def _save_unlocked(payload: dict, date: str) -> SaveResult:
     """写 `<date>.json` + `latest.json`。不可用产物**不覆盖**已有的可用产物。"""
-    os.makedirs(DIR, exist_ok=True)
-    dated = safe_join(DIR, f"{date}.json")
-    latest = safe_join(DIR, "latest.json")
+    os.makedirs(account_context.path(DIR), exist_ok=True)
+    dated = safe_join(account_context.path(DIR), f"{date}.json")
+    latest = safe_join(account_context.path(DIR), "latest.json")
 
     if usable(payload):
         # Validate every existing destination before replacing either file.
@@ -120,13 +121,13 @@ def _save_unlocked(payload: dict, date: str) -> SaveResult:
                 raise ValueError("最近复盘索引损坏，请修复后重试；本次未覆盖报告")
         old = _read(dated)
         if old is not None:
-            versions = Path(DIR) / "_versions"
+            versions = Path(account_context.path(DIR)) / "_versions"
             versions.mkdir(exist_ok=True)
             _atomic_write(str(versions / f"{date}.{uuid.uuid4().hex}.json"), old)
         _atomic_write(dated, payload)
         if not current or (current.get("target_date") or current.get("trade_date") or "") <= date:
             _atomic_write(latest, payload)
-        if os.environ.get("VIBE_WORKER_KEY"):
+        if account_context.ENABLED or os.environ.get("VIBE_WORKER_KEY"):
             from sharing_worker import queue_publication
             queue_publication({**payload, "complete": complete(payload)})
         return SaveResult(True)
@@ -140,8 +141,8 @@ def _save_unlocked(payload: dict, date: str) -> SaveResult:
             _atomic_write(path, payload)
 
     stamp = china_now().strftime("%Y%m%d-%H%M%S")
-    os.makedirs(REJECT_DIR, exist_ok=True)
-    rejected = safe_join(REJECT_DIR, f"{date}.rejected-{stamp}.json")
+    os.makedirs(account_context.path(REJECT_DIR), exist_ok=True)
+    rejected = safe_join(account_context.path(REJECT_DIR), f"{date}.rejected-{stamp}.json")
     _atomic_write(rejected, payload)
 
     # 把 AI 段留下的占位（含真实报错）带进 reason —— 只报「没跑通」用户无从下手（#9）
@@ -178,14 +179,14 @@ def _with_baselines(env: dict | None) -> dict | None:
 def load(date: str | None = None) -> dict | None:
     """读某天的复盘；`date=None` 读 latest。文件损坏当不存在处理（不抛）。"""
     name = "latest.json" if date is None else f"{date}.json"
-    path = safe_join(DIR, name)
+    path = safe_join(account_context.path(DIR), name)
     return _with_baselines(_read(path)) if os.path.exists(path) else None
 
 
 def dates() -> list[str]:
     """有哪些历史复盘，新→旧。给看板的历史入口用"""
     out = []
-    for p in Path(DIR).glob("*.json"):
+    for p in Path(account_context.path(DIR)).glob("*.json"):
         stem = p.stem
         if not (len(stem) == 10 and stem[4] == "-" and stem[7] == "-" and stem.replace("-", "").isdigit()):
             continue

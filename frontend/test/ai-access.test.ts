@@ -46,3 +46,12 @@ test('incomplete or unsafe API fields cannot start a paid probe', () => {
   assert.equal(draftError({...d,baseURL:'https://mine.cn-beijing.maas.aliyuncs.com/compatible-mode/v1'}),'');
   assert.ok(draftError({...draftFor('deepseek'),apiKey:''}));
 });
+
+test('API entry restores the saved account provider and credentials', () => {
+  const saved={provider:'api-compatible',model:'MiniMax-M2',baseURL:'https://api.minimaxi.com/v1',apiKey:'TEST_ONLY_KEY'};
+  assert.deepEqual(draftFor('api',saved),{...saved,provider:'minimax'});
+  assert.equal(draftFor('api',null).provider,'deepseek');
+  assert.equal(draftFor('api',{provider:'codex-private',model:'gpt',baseURL:'',apiKey:''}).apiKey,'');
+  assert.equal(draftFor('deepseek',saved).apiKey,'');
+  assert.equal(draftFor('minimax',saved).apiKey,'TEST_ONLY_KEY');
+});

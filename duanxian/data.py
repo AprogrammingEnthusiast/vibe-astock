@@ -1,6 +1,7 @@
 """短线复盘数据层 —— 在 `fetchers` 的取数函数之上做缓存、降级与文本化。"""
 
 from __future__ import annotations
+import account_context
 
 from typing import Optional
 
@@ -334,9 +335,9 @@ def get_leader_data(date: str) -> str:
         top = sorted(ladder, key=lambda x: x["consec_boards"], reverse=True)[:12]
 
         if top:
-            os.makedirs(_LEADER_DIR, exist_ok=True)
+            os.makedirs(account_context.path(_LEADER_DIR), exist_ok=True)
             try:
-                path = safe_join(_LEADER_DIR, f"{d}.json")
+                path = safe_join(account_context.path(_LEADER_DIR), f"{d}.json")
                 tmp = path + ".tmp"
                 with open(tmp, "w", encoding="utf-8") as fh:
                     json.dump({"date": date, "ladder": top}, fh, ensure_ascii=False)
@@ -353,7 +354,7 @@ def get_leader_data(date: str) -> str:
 
         # 载入最近 5 份已有快照，归档日期不一定连续。
         try:
-            files = sorted(f for f in os.listdir(_LEADER_DIR) if f.endswith(".json") and f[:8] < d)
+            files = sorted(f for f in os.listdir(account_context.path(_LEADER_DIR)) if f.endswith(".json") and f[:8] < d)
         except FileNotFoundError:
             files = []
         hist = files[-5:]
@@ -361,7 +362,7 @@ def get_leader_data(date: str) -> str:
             lines.append("最近 5 份已有历史归档（日期可能不连续，不代表最近五个交易日）：")
             for hf in hist:
                 try:
-                    with open(os.path.join(_LEADER_DIR, hf), encoding="utf-8") as fh:
+                    with open(os.path.join(account_context.path(_LEADER_DIR), hf), encoding="utf-8") as fh:
                         h = json.load(fh)
                     hl = h.get("ladder", [])
                     if hl:

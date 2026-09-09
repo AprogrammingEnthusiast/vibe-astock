@@ -51,3 +51,10 @@ def test_model_catalogs_are_filtered(monkeypatch):
     assert sys.modules["app"].chat_layer.list_models(
         {"baseURL": "https://api.example.com/v1", "apiKey": "fake"},
     ) == ["model-a", "model-b"]
+
+def test_api_model_catalog_is_not_truncated(monkeypatch):
+    expected = [f"model-{i}" for i in range(650)]
+    response = SimpleNamespace(status_code=200, json=lambda: {"data": [{"id": m} for m in expected]})
+    layer = sys.modules["app"].chat_layer
+    monkeypatch.setattr(layer.requests, "get", lambda *args, **kwargs: response)
+    assert layer.list_models({"baseURL": "https://api.example.com/v1", "apiKey": "fake"}) == expected

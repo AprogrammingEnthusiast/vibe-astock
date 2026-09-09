@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import queue
+import re
 import shutil
 import subprocess
 import sys
@@ -102,9 +103,9 @@ class Access:
         try:
             target(*args)
         except EvidenceError as exc:
-            self._update(status="cancelled" if self.cancel.is_set() else "failed", error=str(exc), auth_url=None)
+            self._update(status="cancelled" if self.cancel.is_set() else "failed", error=str(exc), auth_url=None, user_code=None)
         except Exception:
-            self._update(status="failed", error="连接未完成，请检查网络或接入设置后重试", auth_url=None)
+            self._update(status="failed", error="连接未完成，请检查网络或接入设置后重试", auth_url=None, user_code=None)
 
     def stop(self) -> dict:
         self.cancel.set()
@@ -185,11 +186,18 @@ class Access:
                         raise EvidenceError("登录请求失败，请检查网络后重试")
                     if event.get("id") == 1:
                         send("initialized")
-                        send("account/login/start", {"type": "chatgpt"}, 2)
+                        send("account/login/start", {"type": "chatgptDeviceCode" if os.environ.get("VIBE_WORKER_KEY") else "chatgpt"}, 2)
                     elif event.get("id") == 2:
                         result = event["result"]
                         login_id = result["loginId"]
-                        self._update(auth_url=public_login_url(result["authUrl"]), message="请在官方页面完成登录")
+                        if os.environ.get("VIBE_WORKER_KEY"):
+                            code = result.get("userCode")
+                            if not isinstance(code, str) or not re.fullmatch(r"[A-Z0-9-]{6,20}", code):
+                                raise EvidenceError("设备登录验证码格式无效，请重试")
+                            self._update(auth_url=public_login_url(result["verificationUrl"]), user_code=code,
+                                         message="请打开官方登录页，输入下方一次性验证码完成授权")
+                        else:
+                            self._update(auth_url=public_login_url(result["authUrl"]), message="请在官方页面完成登录")
                     elif event.get("method") == "account/login/completed":
                         params = event["params"]
                         if params.get("loginId") != login_id:
@@ -207,7 +215,7 @@ class Access:
                             raise EvidenceError("登录已取消")
                         os.chmod(auth, 0o600)
                         os.replace(auth, self.runtime.home / "auth.json")
-                        self._update(status="complete", auth_url=None, message="产品专用 ChatGPT 登录已完成；可继续测试模型")
+                        self._update(status="complete", auth_url=None, user_code=None, message="产品专用 ChatGPT 登录已完成；可继续测试模型")
                         return
                 raise EvidenceError("登录已超时，请重新发起")
             finally:

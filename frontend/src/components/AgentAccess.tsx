@@ -3,7 +3,7 @@ import { randomId } from "@/lib/random-id";
 import { useEffect, useId, useRef, useState } from 'react';
 import { agentRequest, AgentRequestError, loadAgentConnection, saveAgentConnection, type AgentConnection } from '@/lib/agent-api';
 import { API_PROVIDERS, SUBSCRIPTION_PROVIDERS, draftFor, connectionFor, providerFor, sourceLabel, draftError, isSubscription } from '@/lib/ai-access';
-type Job = {id?:string; kind?:string; status:string; message?:string; error?:string; auth_url?:string|null; source?:{provider:string;model:string}};
+type Job = {id?:string; kind?:string; status:string; message?:string; error?:string; auth_url?:string|null; user_code?:string|null; source?:{provider:string;model:string}};
 type Health = {installed:boolean; subscription_ready:boolean; models:{model:string;is_default:boolean}[];default_model:string; models_error:string};
 type Subscription = {installed:boolean; authenticated:boolean; available:boolean; detail:string};
 const pendingKey='astock-agent-pending-test';
@@ -125,6 +125,7 @@ export function AgentAccess({initialProvider,onSaved,onBusyChange}:{initialProvi
    {validation&&<p className="text-xs text-muted-foreground">{validation}</p>}
   </>}
   <p className="text-xs leading-6 text-muted-foreground">点击测试会使用少量所选服务额度，成功才保存。{sharedWebsite ? '配置保存在你的私人服务实例和本浏览器的账号空间中；生成内容使用你自己的额度。' : 'API 密钥保存在本机浏览器，发送给本机后端用于连接所选服务。同一系统账户下的程序可能读取这些本地数据。'}</p>
+  {job.user_code&&job.status==='running'&&<p className="text-sm">一次性验证码：<code aria-label="Codex 设备验证码" className="select-all rounded bg-muted px-2 py-1 font-mono">{job.user_code}</code>，请在官方登录页输入。</p>}
   {job.auth_url&&job.status==='running'&&<a href={job.auth_url} target="_blank" rel="noreferrer" className="text-sm text-primary underline">打开官方登录页</a>}
   <div className="flex flex-wrap gap-2"><button type="button" disabled={busy||!!validation||(cli?!subscription?.available:provider==='codex-private'?!catalog?.subscription_ready:false)} onClick={()=>void start('probe')} className="rounded bg-primary px-4 py-2 text-sm text-primary-foreground disabled:opacity-50">测试连接并保存</button><button type="button" disabled={busy} onClick={()=>{setError('');setRevision(n=>n+1);}} className="rounded border border-border px-3 py-2 text-sm">刷新状态</button>
   {unconfirmed&&<p role="status" className="w-full text-xs">提交结果尚未确认，正在查询状态。可重新确认同一次测试，或取消。</p>}

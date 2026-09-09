@@ -50,9 +50,15 @@ def test_only_one_access_operation_and_cancellation(tmp_path, monkeypatch):
     assert access.stop()['status'] == 'cancelled'
 
 
-def test_login_protocol_uses_staging_and_installs_only_on_success(tmp_path, monkeypatch):
+@pytest.mark.parametrize("success", [False, True])
+@pytest.mark.parametrize("shared", [False, True])
+def test_login_protocol_uses_staging_and_installs_only_on_success(tmp_path, monkeypatch, shared, success):
     import sys
     import review_agent.access as module
+    if shared:
+        monkeypatch.setenv('VIBE_WORKER_KEY', 'test-worker')
+    else:
+        monkeypatch.delenv('VIBE_WORKER_KEY', raising=False)
     fake = tmp_path / 'engine.py'
     fake.write_text('''import sys,json,os
 from pathlib import Path
@@ -60,20 +66,33 @@ for line in sys.stdin:
  e=json.loads(line);i=e.get('id')
  if i==1:r={}
  elif i==2:
-  r={'loginId':'attempt','authUrl':'https://auth.openai.com/oauth/authorize'}
+  shared=SHARED_FIXTURE
+  assert e['params']['type']==('chatgptDeviceCode' if shared else 'chatgpt')
+  r={'loginId':'attempt','verificationUrl':'https://auth.openai.com/codex/device','userCode':'TEST-1234'} if shared else {'loginId':'attempt','authUrl':'https://auth.openai.com/oauth/authorize'}
  elif i==3:
   Path(os.environ['CODEX_HOME'],'auth.json').write_text('product-only-canary')
   r={'account':{'type':'chatgpt'}}
  else:continue
  print(json.dumps({'id':i,'result':r}),flush=True)
- if i==2:print(json.dumps({'method':'account/login/completed','params':{'loginId':'attempt','success':True}}),flush=True)
-''')
+ if i==2:print(json.dumps({'method':'account/login/completed','params':{'loginId':'attempt','success':SUCCESS_FIXTURE}}),flush=True)
+'''.replace('SHARED_FIXTURE', repr(shared)).replace('SUCCESS_FIXTURE', repr(success)))
     monkeypatch.setattr(module, 'engine_command', lambda:[sys.executable,str(fake)])
     runtime=Runtime(tmp_path/'product')
+    (runtime.home/'auth.json').write_text('previous-login-canary')
     access=Access(runtime)
+    updates=[]
+    original=access._update
+    def record(**values):
+        updates.append(values)
+        original(**values)
+    monkeypatch.setattr(access, '_update', record)
     access.start('login')
-    assert wait(access)['status']=='complete'
-    assert (runtime.home/'auth.json').read_text()=='product-only-canary'
+    state=wait(access)
+    assert state['status']==('complete' if success else 'failed')
+    assert state.get('user_code') is None
+    if shared:
+        assert any(u.get('user_code')=='TEST-1234' and u.get('auth_url')=='https://auth.openai.com/codex/device' for u in updates)
+    assert (runtime.home/'auth.json').read_text()==('product-only-canary' if success else 'previous-login-canary')
     assert not list(runtime.root.glob('login-*'))
 
 

@@ -81,3 +81,5 @@ node frontend/tests/codex-reconnect.mjs
 升级会将本人实例已有的 Codex 登录复制到本人的新版运行目录（旧文件保留）；新旧登录都在该账号自己的数据卷内。点击「断开我的 Codex」会撤销这两份本地登录，进行中的任务会阻止断开。新授权使用新版的官方登录页面，成功后选择模型并测试保存。
 
 共享部署保持原 VR_DATA_DIR（默认 ~/.vibe-research），个人记录不会因上游默认目录变化而隐藏；新 Agent 数据位于本人卷的 ~/.vibe-astock-agent。两处都应纳入备份。镜像增加上游 runtime、review_agent、backtest 和 research_data，仍使用原 .sharing/compose.json 更新，禁止删除数据卷。
+
+共享部署的新版 Codex 登录使用设备码授权：点击「登录 ChatGPT」后，在官方页面输入网站显示的一次性验证码，无需访问 localhost:1455。授权成功后回到设置选择模型并测试保存；失败或取消不会替换原有登录。

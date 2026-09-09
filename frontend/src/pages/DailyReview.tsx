@@ -1,6 +1,7 @@
 import { useState, useEffect, Fragment } from "react";
 import { pctColor } from "@/lib/colors";
 import { Sparkles, Loader2, RefreshCw, Gauge, ArrowDownUp, TrendingUp, TrendingDown, Plus, X, Flame, BarChart3, Globe } from "lucide-react";
+import { SectorFlowPanel } from "@/components/SectorFlowPanel";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { GlassCard } from "@/components/ui/GlassCard";
 import { Caliber } from "@/components/ui/Caliber";
@@ -11,6 +12,7 @@ import { api, type IndexQuote, type Quote, type MarketOverview, type ShortTermEm
 import { useDeepDive, DeepDivePanel, RunAllButton, type DiveItem } from "@/components/ui/DeepDive";
 import { loadWatch, saveWatch, addCodes } from "@/lib/watchlist";
 import { cn } from "@/lib/utils";
+import { toast } from "sonner";
 
 // A股红涨绿跌。全球市场（美股/港股指数）**也沿用红涨**——与整个看板及东财等中国平台一致，
 // A 股惯例：红涨绿跌。与国际绿涨惯例相反，是有意选择，全站必须一致，勿改。
@@ -134,17 +136,19 @@ export function DailyReview() {
     localStorage.setItem(AUTO_KEY, next ? "1" : "0");
   };
 
-  const addWatch = () => {
+  const addWatch = async () => {
     // 支持一次粘贴多只（逗号 / 空格分隔）；全部无效或重复则清空输入、无副作用。
     const { next, added } = addCodes(watchCodes, watchInput);
     setWatchInput("");
     if (!added) return;
-    setWatchCodes(next); saveWatch(next); refreshWatch(next);
+    try { await saveWatch(next); } catch (e) { toast.error(e instanceof Error ? e.message : "保存失败"); return; }
+    setWatchCodes(next); refreshWatch(next);
   };
 
-  const removeWatch = (c: string) => {
+  const removeWatch = async (c: string) => {
     const next = watchCodes.filter((x) => x !== c);
-    setWatchCodes(next); saveWatch(next); refreshWatch(next);
+    try { await saveWatch(next); } catch (e) { toast.error(e instanceof Error ? e.message : "保存失败"); return; }
+    setWatchCodes(next); refreshWatch(next);
   };
 
   const today = new Date().toLocaleDateString("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit" });
@@ -665,51 +669,13 @@ export function DailyReview() {
         )}
       </GlassCard>
 
-      {/* 5. 板块资金趋势榜（行业） */}
-      <div className="mb-3 flex items-center gap-2">
-        <h3 className="flex items-center gap-1.5 text-sm font-semibold text-muted-foreground"><TrendingUp className="h-4 w-4" /> 板块资金趋势榜</h3>
-        <Caliber text={
-          "净流入 / 流入 / 流出取自同花顺行业资金流的**盘中即时值**，单位亿元，净流入 = 流入 − 流出。\n" +
-          "⚠️ 那边没说明这是主力资金还是全部成交资金，所以**不能当作主力净流入**来读。\n" +
-          "涨跌% 是行业整体涨幅；成分股数是这个行业的公司总数，不是上涨家数、也不是涨停家数。"
-        } />
-        <span className="text-[11px] text-muted-foreground/50">行业 · 按今日净流入排序</span>
-      </div>
-      <GlassCard className="mb-6">
-        {sectors.length === 0 ? (
-          pending(ovDone)
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b border-border/50 text-left text-xs text-muted-foreground">
-                  {["行业", "涨跌%", "今日净流入", "流入(亿)", "流出(亿)", "成分股数"].map((h) => (
-                    <th key={h} className="whitespace-nowrap px-2 py-2 font-medium">{h}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {sectors.slice(0, 15).map((s) => (
-                  <tr key={s.name} className="border-b border-border/30">
-                    <td className="px-2 py-2 font-medium">{s.name}</td>
-                    <td className={cn("px-2 py-2 font-mono", pctColor(s.pct))}>{s.pct > 0 ? "+" : ""}{s.pct}%</td>
-                    <td className={cn("px-2 py-2 font-mono", pctColor(s.net))}>{s.net > 0 ? "+" : ""}{fmt(s.net)} 亿</td>
-                    <td className="px-2 py-2 font-mono text-muted-foreground">{fmt(s.inflow)}</td>
-                    <td className="px-2 py-2 font-mono text-muted-foreground">{fmt(s.outflow)}</td>
-                    <td className="px-2 py-2 font-mono text-muted-foreground">{s.firms}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </GlassCard>
+      <SectorFlowPanel overview={overview} loading={!ovDone} onRefresh={loadHeavy} />
 
       {/* 6. 资金轮动 */}
       <div className="mb-3 flex items-center gap-2">
         <h3 className="flex items-center gap-1.5 text-sm font-semibold text-muted-foreground"><ArrowDownUp className="h-4 w-4" /> 资金轮动</h3>
         <Caliber text={
-          "就是上面那张榜的两头：流入榜只放净流入为正的、流出榜只放为负的，各取前六。\n" +
+          "从全部行业中选取：流入榜只放净流入为正的、流出榜只放为负的，各取前六。\n" +
           "某一边不足六个就只列够格的那几个 —— 普跌日往往只有两三个行业真净流入。\n" +
           "口径同上：同花顺行业资金流盘中即时值，不能当主力净流入读。"
         } />

@@ -22,6 +22,7 @@ import chat as chat_layer
 import cli_runtime
 import gstock
 import newsradar
+import probability
 import portfolio as pf
 import market
 import myreports as mr
@@ -88,6 +89,29 @@ class ChatReq(BaseModel):
     llm: LLMConfig
 
 
+class HeadlineTranslationReq(BaseModel):
+    items: list[dict]
+    llm: LLMConfig
+
+
+class ModelsReq(BaseModel):
+    baseURL: str
+    apiKey: str
+
+
+@app.post("/api/ai/models")
+def ai_models(req: ModelsReq):
+    if not req.baseURL.strip() or not req.apiKey.strip():
+        raise HTTPException(400, "请先填写 Base URL 和 API Key")
+    try:
+        models = chat_layer.list_models(req.model_dump())
+    except RuntimeError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    if not models:
+        raise HTTPException(502, "当前端点没有返回可用模型")
+    return {"models": models}
+
+
 @app.post("/api/chat")
 def chat(req: ChatReq):
     """系统 AI 对话，**流式** NDJSON（每行一个事件 {type: tool|delta|done|error}）。
@@ -120,6 +144,24 @@ def chat(req: ChatReq):
             yield json.dumps({"type": "error", "message": f"对话失败：{e}"}, ensure_ascii=False) + "\n"
 
     return StreamingResponse(gen(), media_type="application/x-ndjson")
+
+
+@app.post("/api/translate-headlines")
+def translate_headlines(req: HeadlineTranslationReq):
+    """Investment News 专用翻译入口：无工具、无会话记忆。"""
+    if not req.llm.model:
+        raise HTTPException(400, "缺少模型配置，请先在「接入 AI」里选择")
+    is_cli = req.llm.provider.startswith("cli-")
+    if is_cli and not cli_runtime.detect_cli(req.llm.provider[4:]):
+        raise HTTPException(400, "未检测到对应的本机 AI 命令")
+    if not is_cli and (not req.llm.apiKey or not req.llm.baseURL):
+        raise HTTPException(400, "缺少 Base URL 或 API Key，请先在「接入 AI」里填写")
+    try:
+        return {"items": chat_layer.translate_headlines(req.llm.model_dump(), req.items)}
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except (RuntimeError, KeyError, IndexError) as exc:
+        raise HTTPException(502, f"标题翻译失败：{exc}") from exc
 
 
 class HoldingIn(BaseModel):
@@ -252,6 +294,19 @@ def radar_refresh():
         return {"data": newsradar.fetch_radar()}
     except Exception as e:  # noqa: BLE001
         raise HTTPException(502, f"资讯雷达刷新失败：{e}") from e
+
+
+@app.get("/api/radar/events")
+def radar_events():
+    return {"data": probability.get_probability()}
+
+
+@app.post("/api/radar/events/refresh")
+def radar_events_refresh():
+    try:
+        return {"data": probability.get_probability(force=True)}
+    except Exception as e:
+        raise HTTPException(502, f"事件概率刷新失败：{e}") from e
 
 
 @app.get("/api/market/overview")

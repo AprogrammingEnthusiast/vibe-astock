@@ -118,18 +118,17 @@ export function DailyWatch() {
     return () => window.clearInterval(t);
   }, []);
 
-  const toggleWatch = (code: string) => {
-    setWatch((prev) => {
-      const next = prev.includes(code) ? prev.filter((c) => c !== code) : [...prev, code];
-      saveWatch(next);
-      return next;
-    });
+  const toggleWatch = async (code: string) => {
+    const next = watch.includes(code) ? watch.filter((c) => c !== code) : [...watch, code];
+    try { await saveWatch(next); setWatch(next); }
+    catch (e) { setErr(e instanceof Error ? e.message : "保存失败"); }
   };
 
-  const addWatchInput = () => {
+  const addWatchInput = async () => {
     if (!watchInput.trim()) return;
     const { next } = addCodes(watch, watchInput);
-    saveWatch(next);
+    try { await saveWatch(next); }
+    catch (e) { setErr(e instanceof Error ? e.message : "保存失败"); return; }
     setWatch(next);
     setWatchInput("");
   };

@@ -42,6 +42,17 @@ def usable(payload: Any) -> bool:
     return len((payload.get("focus_md") or "").strip()) >= _MIN_FOCUS_MD
 
 
+def complete(payload: Any) -> bool:
+    """无降级且主要数据、全部分析师报告齐全，才禁止重复复盘。"""
+    if not usable(payload) or payload.get("warnings"):
+        return False
+    if not payload.get("emotion_metrics") or not payload.get("market_facts"):
+        return False
+    reports = {r.get("key"): r.get("html", "").strip()
+               for r in (payload.get("analysts") or []) if isinstance(r, dict)}
+    return all(reports.get(role.key) for role in ROLES)
+
+
 def _atomic_write(path: str, payload: dict) -> None:
     tmp = f"{path}.{uuid.uuid4().hex}.tmp"   # 唯一临时名，并发写不互踩
     with open(tmp, "w", encoding="utf-8") as fh:
@@ -68,6 +79,9 @@ def save(payload: dict, date: str) -> SaveResult:
     if usable(payload):
         _atomic_write(dated, payload)
         _atomic_write(latest, payload)
+        if os.environ.get("VIBE_WORKER_KEY"):
+            from sharing_worker import queue_publication
+            queue_publication({**payload, "complete": complete(payload)})
         return SaveResult(True)
 
     kept: list[str] = []

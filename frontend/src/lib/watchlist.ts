@@ -1,19 +1,21 @@
-// 关注股票（自选股）—— 只存本地 localStorage，不上传、不进仓库。
+import { accountKey, accountRequest, sharedWebsite } from "./account";
+// 自选随网站账号保存；单人部署仍使用本地存储。
 // 行情复用 /api/quote；复盘时把关注股行情一并喂给用户自己的 AI。
 
 const KEY = "vr-watchlist";
 
 export function loadWatch(): string[] {
   try {
-    const v = JSON.parse(localStorage.getItem(KEY) || "[]");
+    const v = JSON.parse(localStorage.getItem(accountKey(KEY)) || "[]");
     return Array.isArray(v) ? v.filter((c) => /^\d{6}$/.test(c)) : [];
   } catch {
     return [];
   }
 }
 
-export function saveWatch(codes: string[]) {
-  localStorage.setItem(KEY, JSON.stringify(codes));
+export async function saveWatch(codes: string[]) {
+  if (sharedWebsite) await accountRequest("/api/account/watchlist", "PUT", { codes });
+  localStorage.setItem(accountKey(KEY), JSON.stringify(codes));
 }
 
 // 从任意文本里抽取 6 位 A 股代码（逗号 / 空格 / 换行 / 顿号分隔都行，方便一次粘贴一串）。

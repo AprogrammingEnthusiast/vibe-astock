@@ -1251,48 +1251,20 @@ class TestBackwardCompatAndGuards:
 
 
 class TestAuthorAttribution:
-    """作者署名 —— 只留 X，不放个人网站。
+    """保留项目品牌；页面不展示原作者署名或社交入口。"""
 
-    公开产物的联系方式只用 X `@linsizhen`
-    与邮箱，**禁止出现个人网站 simonlin.net**。这类文案容易被后来的改动带回去，
-    所以钉一下。
-    """
+    def test_no_author_attribution_in_public_ui(self):
+        from pathlib import Path
 
-    def test_no_personal_site_anywhere_in_frontend(self):
-        import pathlib
-
-        hits = []
-        for p in pathlib.Path("frontend/src").rglob("*.ts*"):
-            txt = p.read_text(encoding="utf-8")
-            for line in txt.splitlines():
-                if "simonlin.net" in line and not line.strip().startswith(("//", "*", "/*")):
-                    hits.append(f"{p}: {line.strip()}")
-        assert not hits, f"前端出现了个人网站：{hits}"
-
-    def test_footer_shows_author_and_x_handle(self):
-        import pathlib
-
-        src = pathlib.Path("frontend/src/components/layout/Layout.tsx").read_text(encoding="utf-8")
-        assert 'const X_URL = "https://x.com/linsizhen"' in src
-        assert "Simon 林" in src
-        assert "@linsizhen" in src
-        assert "联系作者" not in src
-
-    def test_x_logo_is_not_lucide_x_icon(self):
-        """X 品牌标必须是内联 SVG"""
-        import pathlib
-
-        src = pathlib.Path("frontend/src/components/layout/Layout.tsx").read_text(encoding="utf-8")
-        assert "function XLogo" in src, "要用内联 SVG 品牌标"
-        assert "<XLogo" in src
-        # 不能从 lucide 引 X / Twitter 当品牌标
-        import re
-
-        imports = "".join(re.findall(r'from "lucide-react";', src)
-                          and re.findall(r'import \{([^}]*)\} from "lucide-react";', src, re.S))
-        names = {n.strip() for n in imports.split(",")}
-        assert "X" not in names and "Twitter" not in names, \
-            f"别从 lucide 引 X/Twitter 当品牌标：{names & {'X', 'Twitter'}}"
+        paths = [Path("frontend/index.html"), *Path("frontend/src").rglob("*.tsx")]
+        for path in paths:
+            src = path.read_text(encoding="utf-8")
+            # 保留源文件中的许可证和版权注释，仅检查页面内容。
+            visible = "\n".join(line for line in src.splitlines()
+                                if not line.lstrip().startswith("//"))
+            for marker in ("simonlin", "linsizhen", "Simon 林", "XLogo",
+                           "github.com", "x.com/"):
+                assert marker not in visible, f"{path}: {marker}"
 
 
 class TestNoRouteShadowing:
@@ -1706,7 +1678,7 @@ class TestBlockedCliRemovedFromRuntime:
         import pathlib
 
         llm = pathlib.Path("frontend/src/lib/llm.ts").read_text(encoding="utf-8")
-        load_body = llm[llm.index("export function loadLlm"):llm.index("export function saveLlm")]
+        load_body = llm[llm.index("export function loadLlm"):llm.index("export async function saveLlm")]
         assert "serverAllowsCli" in load_body, "loadLlm 要按服务端答案拦"
         assert "staleBlockedProvider" in llm, "要能告诉用户「原来那个为什么没了」"
 
@@ -1849,7 +1821,7 @@ class TestCliAvailabilityEndpoint:
         """"被禁"和"没装"必须分开报 —— 一个别想了，一个装一下就行。"""
         d = self._payload()
         for c in d["clis"]:
-            assert set(c) == {"kind", "allowed", "installed", "reason"}
+            assert {"kind", "allowed", "installed", "reason"} <= set(c)
             assert isinstance(c["allowed"], bool) and isinstance(c["installed"], bool)
         claude = next(c for c in d["clis"] if c["kind"] == "claude")
         assert claude["allowed"] is True and claude["reason"] is None
@@ -1987,8 +1959,9 @@ class TestOneSourceOfTruthForCliAvailability:
         import pathlib
 
         s = pathlib.Path("frontend/src/main.tsx").read_text(encoding="utf-8")
-        body = "\n".join(l for l in s.splitlines() if not l.lstrip().startswith("import"))
-        assert "primeCliAvailability(" in body, "启动时要真的调一次，不是只 import"
+        assert "<AccountGate>" in s, "私有配置必须在网站身份确认后读取"
+        gate = pathlib.Path("frontend/src/components/AccountGate.tsx").read_text(encoding="utf-8")
+        assert gate.index("initializeAccount().then") < gate.index("primeCliAvailability(authHeaders())")
 
     def test_server_answer_is_three_state(self):
         """`true / false / undefined` 三态不能塌成两态。
@@ -3567,7 +3540,8 @@ class TestReviewOnlyRunsOnSettledSessions:
         assert body["suggest_date"] == "2026-07-29"
         assert "还没收盘" in body["error"]
 
-    def test_already_reviewed_session_is_not_rerun(self, monkeypatch):
+    @pytest.mark.parametrize("force", [False, True])
+    def test_already_reviewed_session_is_not_rerun(self, monkeypatch, force):
         import server
         from duanxian import review_store, trade_calendar as tc
 
@@ -3575,16 +3549,18 @@ class TestReviewOnlyRunsOnSettledSessions:
         monkeypatch.setattr(tc, "latest_session", lambda: "2026-07-29")
         monkeypatch.setattr(tc, "is_settled", lambda d: True)
         monkeypatch.setattr(review_store, "load", lambda d: {"stub": True})
-        monkeypatch.setattr(review_store, "usable", lambda p: True)
+        monkeypatch.setattr(review_store, "complete", lambda p: True)
         monkeypatch.setattr(server.threading, "Thread",
                             lambda **kw: pytest.fail("已复盘过的日子不该重跑"))
 
-        r = server.api_run(self._req(), date="2026-07-29")   # type: ignore[arg-type]
+        req = self._req()
+        req.query_params = {"force": "1"} if force else {}
+        r = server.api_run(req, date="2026-07-29")   # type: ignore[arg-type]
         assert r["already_done"] is True and r["running"] is False
-        assert "已复盘" in r["message"]
+        assert "当日已完成复盘" in r["message"]
 
-    def test_force_flag_allows_a_rerun(self, monkeypatch):
-        """改了口径 / 修了 bug 时要能重跑，但得显式带 force。"""
+    def test_incomplete_review_allows_a_rerun(self, monkeypatch):
+        """缺失数据的报告无需 force 即可重跑。"""
         import server
         from duanxian import review_store, trade_calendar as tc
 
@@ -3598,7 +3574,7 @@ class TestReviewOnlyRunsOnSettledSessions:
                             lambda target, args, daemon: type("T", (), {"start": lambda s: started.append(args[0])})())
 
         req = self._req()
-        req.query_params = {"force": "1"}
+        req.query_params = {}
         r = server.api_run(req, date="2026-07-29")   # type: ignore[arg-type]
         assert r.get("running") is True and started == ["2026-07-29"]
 
@@ -7337,3 +7313,21 @@ class TestVersionIsConsistentEverywhere:
         vs = {f: re.search(r"badge/version-v([\d.]+)-", self._read(f)).group(1)
               for f in ("README.md", "README_en.md")}
         assert len(set(vs.values())) == 1, f"中英文 README 版本号不一致：{vs}"
+
+
+@pytest.mark.unit
+def test_review_completeness():
+    from duanxian import review_store
+    from duanxian.roles import ROLES
+
+    payload = {"focus": {"directions": []}, "warnings": [],
+               "emotion_metrics": {"date": "2026-09-08"},
+               "market_facts": {"date": "2026-09-08"},
+               "analysts": [{"key": r.key, "html": "<p>报告</p>"} for r in ROLES]}
+    assert review_store.complete(payload)
+    assert not review_store.complete(None)
+    assert not review_store.complete({**payload, "warnings": ["龙虎榜：数据缺失"]})
+    for field in ("emotion_metrics", "market_facts", "analysts"):
+        assert not review_store.complete({**payload, field: None})
+    assert not review_store.complete({**payload, "analysts": payload["analysts"][:-1]})
+    assert not review_store.complete({**payload, "focus": None})

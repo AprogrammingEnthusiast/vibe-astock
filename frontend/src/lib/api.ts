@@ -1,4 +1,5 @@
 import { apiUrl } from "./base";
+import { sharedWebsite } from "./account";
 // 后端 API 客户端。/api → vite 代理到本仓库的 FastAPI（server.py，默认 8910）。
 // 后端未启动或数据源异常时抛 ApiError，页面据此优雅降级。
 
@@ -29,8 +30,28 @@ export function saveAccessKey(key: string) {
 }
 
 export function authHeaders(): Record<string, string> {
+  if (sharedWebsite) return {};
   const k = loadAccessKey();
   return k ? { Authorization: `Bearer ${k}` } : {};
+}
+
+export interface MacroProbItem {
+  topic: string;
+  source: string;
+  title: string;
+  leg: string;
+  prob: number;
+  settle: string;
+  volume: number | null;
+  price_type: string;
+  as_of: string;
+}
+export interface MacroProbability {
+  items: MacroProbItem[];
+  updated: string;
+  partial: boolean;
+  how_to_read: string[];
+  warnings: string[];
 }
 
 export interface MyReport {
@@ -336,6 +357,9 @@ export const api = {
   turnoverTop: () => get<TurnoverTop>("/market/turnover-top"),
   globalIndices: () => get<GlobalIndex[]>("/global/indices"),
   globalStock: (symbol: string) => get<GlobalStock>(`/global/stock?symbol=${encodeURIComponent(symbol)}`),
+  macroProbability: (refresh = false) => refresh
+    ? request<MacroProbability>("/radar/events/refresh", "POST")
+    : get<MacroProbability>("/radar/events"),
   radar: () => get<RadarData>("/radar"),
   radarRefresh: () => request<RadarData>("/radar/refresh", "POST"),
   portfolio: () => get<PortfolioData>("/portfolio"),

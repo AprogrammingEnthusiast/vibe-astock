@@ -2,26 +2,17 @@ import { useEffect, useState } from "react";
 import { Link, Outlet, useLocation } from "react-router-dom";
 import {
   Moon, Sun, ChevronsLeft, ChevronsRight, CandlestickChart, Cog, Swords,
-  Activity, Flame, CalendarRange, Github, Bot, NotebookPen, TrendingDown,
-  Microscope, Sunrise, Eye, Briefcase, Star, LineChart, Radio } from "lucide-react";
+  Activity, Flame, CalendarRange, Bot, NotebookPen, TrendingDown,
+  Microscope, Sunrise, Eye, Briefcase, Star, LineChart, Radio, LogOut } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { loadLlm } from "@/lib/llm";
+import { websiteUser, logoutWebsite } from "@/lib/account";
+import { toast } from "sonner";
 
-function XLogo({ className }: { className?: string }) {
-  return (
-    <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" className={className}>
-      <path d="M18.901 1.153h3.68l-8.04 9.19L24 22.846h-7.406l-5.8-7.584-6.638 7.584H.474l8.6-9.83L0 1.154h7.594l5.243 6.932ZM17.61 20.644h2.039L6.486 3.24H4.298Z" />
-    </svg>
-  );
-}
 import { useDarkMode } from "@/hooks/useDarkMode";
 
 const APP_VERSION = "v0.2.1";
-const REPO_URL = "https://github.com/simonlin1212/Vibe-Astock";
-// 作者联系方式只留 X。
-const X_URL = "https://x.com/linsizhen";
-const X_HANDLE = "@linsizhen";
-const AUTHOR = "Simon 林";
 
 // 产品主体 = 复盘看板：打开就看清今天的短线情绪。
 // 复盘看板本身由 agent 驱动（带 🤖 角标），其余是它的分项数据。
@@ -53,16 +44,43 @@ const AGENT_NAV = [
   { to: "/agent/deepdive", icon: Microscope, label: "个股深挖", agent: true },
 ];
 
-const SETTINGS_NAV = [{ to: "/settings", icon: Cog, label: "接入 AI" }];
-
 export function Layout() {
   const { pathname } = useLocation();
   const { dark, toggle } = useDarkMode();
   const [collapsed, setCollapsed] = useState(() => localStorage.getItem("va-sidebar") === "collapsed");
+  const [llm, setLlm] = useState(loadLlm);
+  const [loggingOut, setLoggingOut] = useState(false);
+  const inSettings = pathname === "/settings" || pathname.startsWith("/settings/");
+  const settingsLink = <Link to="/settings" aria-label="设置" title="设置" aria-current={inSettings ? "page" : undefined}
+    className={cn("flex min-h-11 items-center justify-center gap-2 rounded-lg px-3 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary",
+      collapsed ? "w-10 px-0" : "flex-1 justify-start",
+      inSettings ? "bg-primary/15 text-primary" : "text-muted-foreground hover:bg-muted hover:text-foreground")}>
+    <Cog aria-hidden="true" className="h-4 w-4 shrink-0" />{!collapsed && "设置"}
+  </Link>;
+
+  const logoutButton = websiteUser && <button type="button" aria-label="退出登录" title={`退出登录 · ${websiteUser.username}`} disabled={loggingOut}
+            onClick={async () => {
+              setLoggingOut(true);
+              try { await logoutWebsite(); }
+              catch (e) { toast.error(e instanceof Error ? e.message : "退出失败，请重试"); setLoggingOut(false); }
+            }}
+            className={cn("flex min-h-11 items-center rounded-lg text-sm text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary disabled:opacity-50", "w-9 shrink-0 justify-center")}>
+            <LogOut aria-hidden="true" className="h-4 w-4 shrink-0" />
+          </button>;
 
   useEffect(() => {
     localStorage.setItem("va-sidebar", collapsed ? "collapsed" : "expanded");
   }, [collapsed]);
+
+  useEffect(() => {
+    const refresh = () => setLlm(loadLlm());
+    window.addEventListener("llm-config-change", refresh);
+    window.addEventListener("storage", refresh);
+    return () => {
+      window.removeEventListener("llm-config-change", refresh);
+      window.removeEventListener("storage", refresh);
+    };
+  }, []);
 
   const item = ({ to, icon: Icon, label }: { to: string; icon: LucideIcon; label: string }, agent = false) => {
     const active = pathname === to;
@@ -110,8 +128,16 @@ export function Layout() {
             <CandlestickChart className="h-6 w-6 shrink-0 text-primary text-glow" />
             {!collapsed && <span className="text-lg font-extrabold tracking-tight">Vibe-<span className="text-primary">Astock</span></span>}
           </Link>
-          {}
-          {!collapsed && <p className="mt-1 text-[11px] text-muted-foreground">A 股短线复盘</p>}
+          {!collapsed && (
+            <>
+              <p className="mt-1 text-[11px] text-muted-foreground">{websiteUser ? `公共复盘 · ${websiteUser.username} 的私人空间` : "A 股短线复盘"}</p>
+              <p title={llm?.model} className="mt-2 flex min-w-0 items-center gap-1.5 text-[11px] text-muted-foreground">
+                <Bot aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-primary" />
+                <span className="shrink-0">{llm ? "已接入 AI" : "尚未接入 AI"}</span>
+                {llm && <span className="truncate font-mono text-foreground/80">· {llm.model}</span>}
+              </p>
+            </>
+          )}
         </div>
 
         {/* Nav */}
@@ -131,50 +157,35 @@ export function Layout() {
           {groupLabel("我的交易")}
           {JOURNAL_NAV.map((n) => item(n))}
 
-          {!collapsed && <div className="my-2 border-t border-border/40" />}
-          {SETTINGS_NAV.map((n) => item(n))}
         </nav>
 
         {/* Footer */}
         <div className={cn("border-t border-border/50", collapsed ? "flex flex-col items-center gap-2 p-2" : "space-y-2 p-3")}>
           {collapsed ? (
             <>
+              {settingsLink}
               <button onClick={toggle} className="rounded p-1.5 text-muted-foreground transition-colors hover:text-foreground" title={dark ? "亮色" : "暗色"}>
                 {dark ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
               </button>
-              <a href={X_URL} target="_blank" rel="noreferrer" className="rounded p-1.5 text-muted-foreground transition-colors hover:text-foreground" title={`作者 ${AUTHOR} · X ${X_HANDLE}`}>
-                <XLogo className="h-3.5 w-3.5" />
-              </a>
+              {logoutButton}
               <button onClick={() => setCollapsed(false)} className="rounded p-1.5 text-muted-foreground transition-colors hover:text-foreground" title="展开">
                 <ChevronsRight className="h-4 w-4" />
               </button>
             </>
           ) : (
             <>
-              <div className="flex items-center justify-between">
-                <button onClick={toggle} className="flex items-center gap-1.5 text-xs text-muted-foreground transition-colors hover:text-foreground">
+              <div className="flex items-center gap-2">
+                {settingsLink}
+                <button onClick={toggle} aria-label={dark ? "切换到亮色" : "切换到暗色"} title={dark ? "亮色" : "暗色"} className="flex min-h-11 w-9 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary">
                   {dark ? <Sun className="h-3.5 w-3.5" /> : <Moon className="h-3.5 w-3.5" />}
-                  {dark ? "亮色" : "暗色"}
                 </button>
+                {logoutButton}
                 <div className="flex items-center gap-2">
-                  <a href={X_URL} target="_blank" rel="noreferrer" className="text-muted-foreground transition-colors hover:text-foreground" title={`作者 ${AUTHOR} · X ${X_HANDLE}`}>
-                    <XLogo className="h-3 w-3" />
-                  </a>
-                  <a href={REPO_URL} target="_blank" rel="noreferrer" className="text-muted-foreground transition-colors hover:text-foreground" title="GitHub">
-                    <Github className="h-3.5 w-3.5" />
-                  </a>
                   <button onClick={() => setCollapsed(true)} className="rounded p-1 text-muted-foreground transition-colors hover:text-foreground" title="收起">
                     <ChevronsLeft className="h-3.5 w-3.5" />
                   </button>
                 </div>
               </div>
-              <p className="text-[11px] text-muted-foreground/70">
-                作者：{AUTHOR} ·{" "}
-                <a href={X_URL} target="_blank" rel="noreferrer"
-                  className="text-primary/80 transition-colors hover:text-primary">
-                  X {X_HANDLE}
-                </a>
-              </p>
               <p className="text-[11px] leading-relaxed text-muted-foreground/60">{APP_VERSION} · AI 生成 · 仅供参考 · 非投资建议</p>
             </>
           )}

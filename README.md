@@ -32,16 +32,6 @@
 
 ---
 
-## 寻找深圳的 AI 工作机会
-
-作者目前正在寻找深圳的 AI 相关工作机会，重点关注腾讯等大型科技企业及金融机构的 **AI 投研产品、FDE 与 AI 咨询 / 解决方案岗位**。
-
-兼具金融机构从业经历与 AI 产品实战，持续构建金融市场数据工具和多智能体系统，开源项目累计获得 **17K+ GitHub Stars**。
-
-联系：[simonlin0423@gmail.com](mailto:simonlin0423@gmail.com)
-
----
-
 ## 这是什么
 
 **帮你把今天的复盘做完。**
@@ -319,6 +309,30 @@ PACK = PromptPack(
 
 ## 快速开始
 
+### Docker 本地启动
+
+```bash
+docker compose up -d --build
+```
+
+打开 http://localhost:8910 。镜像自动构建前端，前后端共用一个端口，仅允许本机访问。
+复盘、交易日志和用户配置保存在 Docker 卷 `app-data`（实际名称带项目名前缀），重建容器不会丢失；不要使用 `docker compose down -v`，它会删除数据卷。
+
+Docker 默认使用 Codex 订阅。在“接入 AI”页面点击“登录 Codex”，页面会显示官方设备授权网址
+和一次性代码；完成授权后页面自动检测并允许选择 Codex。
+选择 Codex 后可填写 “Codex Model”；留空使用 CLI 默认模型，填写模型 ID 后保存即可切换。
+授权状态保存在 `app-data` 卷中，重建容器无需重新登录。
+Codex CLI 会自动执行命令，因此只在隔离的容器内运行，并由 `VIBE_ALLOW_UNSAFE_CLI=codex` 显式放行。
+
+如需改用 API，在 `.env` 中设置空的 `VIBE_LLM_CLI=`，并配置 `MIMO_API_KEY`；其它 OpenAI
+兼容服务还需设置 `MIMO_BASE_URL`、`MIMO_MODEL` 和 `MIMO_QUICK_MODEL`。题材数据可选配
+`IWENCAI_API_KEY`。修改后执行 `docker compose up -d`。
+
+查看日志：`docker compose logs -f`；停止服务：`docker compose down`。
+端口占用时在 `.env` 中设置 `VIBE_PORT=8911`，再执行启动命令。
+
+### 直接运行
+
 ```bash
 # Python >= 3.10（akshare 新版要求）
 python3.12 -m venv .venv && .venv/bin/pip install -r requirements.txt
@@ -398,8 +412,7 @@ set VIBE_LLM_CLI=claude
 前提是那个 CLI **已经装好并登录过**，在同一个终端里直接敲 `claude` 能进得去——
 后端只是去 PATH 里找它、复用它的登录态，不会替你登录。
 如果 `claude` 单独能跑、经 server 却报「未检测到」或起不来，
-请把完整报错贴到 [issue](https://github.com/simonlin1212/vibe-astock/issues) 里，
-注明 Windows 版本和 CLI 的安装方式（npm / 安装包），我们跟进。
+请记录完整报错、Windows 版本和 CLI 的安装方式（npm / 安装包），以便排查。
 
 </details>
 
@@ -487,16 +500,6 @@ IWENCAI_API_KEY=你的key
 > - 作者不对使用本工具产生的任何损失承担责任
 > - 股市有风险，投资需谨慎
 
-## 赞赏
-
-觉得有用的话，可以请我喝杯咖啡 ☕
-
-<p align="center">
-  <a href="https://buymeacoffee.com/simonlin1212"><img src="./assets/bmc-qr.png" width="180" alt="Buy Me a Coffee"></a>
-</p>
-
 ## License
 
 Apache-2.0，详见 [LICENSE](LICENSE)。
-
-**作者：** Simon 林 · X [@linsizhen](https://x.com/linsizhen) · 邮箱：[simonlin0423@gmail.com](mailto:simonlin0423@gmail.com)

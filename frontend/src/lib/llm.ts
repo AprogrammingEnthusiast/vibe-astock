@@ -1,7 +1,9 @@
 import { apiUrl } from "./base";
+import { accountKey, accountRequest, sharedWebsite } from "./account";
 // 用户 LLM 配置（只存本地 localStorage，不上传、不进仓库）+ 系统 AI 对话调用。
 
 import { ApiError, authHeaders } from "./api";
+import type { HeadlineTranslationInput } from "./headline-translation";
 import { blockedReason, cliAvailability, cliKindOf, isCliProvider, serverAllowsCli,
   type ProviderId } from "./ai-models";
 
@@ -27,7 +29,7 @@ const KEY = "vr-llm";
 
 export function staleBlockedProvider(): string | null {
   try {
-    const raw = localStorage.getItem(KEY);
+    const raw = localStorage.getItem(accountKey(KEY));
     if (!raw) return null;
     const p = (JSON.parse(raw) as LlmConfig).provider;
     if (serverAllowsCli(p) !== false) return null;   // 能用 / 还不知道 → 不报
@@ -42,7 +44,7 @@ export function staleBlockedProvider(): string | null {
 
 export function loadLlm(): LlmConfig | null {
   try {
-    const raw = localStorage.getItem(KEY);
+    const raw = localStorage.getItem(accountKey(KEY));
     if (!raw) return null;
     const c = JSON.parse(raw) as LlmConfig;
     if (serverAllowsCli(c.provider) === false) return null;
@@ -54,12 +56,16 @@ export function loadLlm(): LlmConfig | null {
   }
 }
 
-export function saveLlm(cfg: LlmConfig) {
-  localStorage.setItem(KEY, JSON.stringify(cfg));
+export async function saveLlm(cfg: LlmConfig) {
+  if (sharedWebsite) await accountRequest("/api/personal/llm", "PUT", { llm: cfg });
+  localStorage.setItem(accountKey(KEY), JSON.stringify(cfg));
+  window.dispatchEvent(new Event("llm-config-change"));
 }
 
-export function clearLlm() {
-  localStorage.removeItem(KEY);
+export async function clearLlm() {
+  if (sharedWebsite) await accountRequest("/api/personal/llm", "PUT", { llm: null });
+  localStorage.removeItem(accountKey(KEY));
+  window.dispatchEvent(new Event("llm-config-change"));
 }
 
 export function hasLlm(): boolean {
@@ -133,4 +139,23 @@ export async function chatStream(messages: ChatMsg[], context: string, handlers:
 // 非流式便捷包装（不需要逐字 UI 的调用方用它）。
 export function chat(messages: ChatMsg[], context: string): Promise<ChatResult> {
   return chatStream(messages, context);
+}
+
+/** RSS 标题走一次性、无工具的受限翻译入口，不进入自由对话。 */
+export async function translateHeadlineBatch(
+  items: HeadlineTranslationInput[], signal?: AbortSignal,
+): Promise<Map<string, string>> {
+  const llm = loadLlm();
+  if (!llm) throw new ApiError("尚未接入 AI，请先在「接入 AI」里配置", 400);
+  const resp = await fetch(apiUrl("/api/translate-headlines"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify({ items, llm }),
+    signal,
+  });
+  let body: { items?: { id: string; zh: string }[]; detail?: string } = {};
+  try { body = await resp.json(); } catch { /* 后端异常页 */ }
+  if (!resp.ok) throw new ApiError(body.detail || `HTTP ${resp.status}`, resp.status);
+  const allowed = new Set(items.map((item) => item.id));
+  return new Map((body.items || []).filter((item) => allowed.has(item.id)).map((item) => [item.id, item.zh]));
 }

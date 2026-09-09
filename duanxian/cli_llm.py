@@ -34,14 +34,16 @@ class CliResponse:
 class CliLlm:
     """把 `llm.invoke(prompt)` 转成一次本机 CLI 调用。"""
 
-    def __init__(self, kind: str, label: str = "") -> None:
+    def __init__(self, kind: str, label: str = "", model: str = "") -> None:
         self.kind = kind
         self.label = label or kind
+        self.model = model
 
     def invoke(self, prompt: str) -> CliResponse:
         _check_available(self.kind)
         run_cli = _load_run_cli()
-        text = run_cli(self.kind, _SYSTEM, prompt)
+        text = (run_cli(self.kind, _SYSTEM, prompt, model=self.model) if self.model
+                else run_cli(self.kind, _SYSTEM, prompt))
         if not (text or "").strip():
             # 空回复要当失败抛出去，别让它变成一段空的复盘正文
             # （`structured.py` 会重试，重试完退回自由文本）

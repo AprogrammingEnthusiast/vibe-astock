@@ -54,10 +54,42 @@ _EXTRA_PATH_DIRS = [
 
 _CLI_TIMEOUT_S = 300  # 子进程兜底超时（秒）
 _MAX_ARG_BYTES = 110_000  # 位置参数投递的提示词字节上限
+credential_lock = threading.Lock()
 
 
 class CliUnavailable(RuntimeError):
     """本机未检测到对应 CLI（未安装 / 不在 PATH）。"""
+
+
+def codex_env() -> dict[str, str]:
+    if not os.environ.get("VIBE_WORKER_KEY"):
+        return dict(os.environ)
+    # Never pass gateway credentials or API fallback keys to the model's process.
+    allowed = {"PATH", "HOME", "USER", "LANG", "LC_ALL", "TMPDIR", "TEMP", "TMP", "SYSTEMROOT",
+               "SSL_CERT_FILE", "SSL_CERT_DIR", "CODEX_CA_CERTIFICATE"}
+    return {**{k: v for k, v in os.environ.items() if k in allowed},
+            "CODEX_HOME": os.environ["CODEX_HOME"]}
+
+
+def codex_auth_args() -> list[str]:
+    return (["-c", 'cli_auth_credentials_store="file"', "-c", 'forced_login_method="chatgpt"']
+            if os.environ.get("VIBE_WORKER_KEY") else [])
+
+
+def _execution_args(kind: str, args: list[str]) -> list[str]:
+    if kind == "codex" and os.environ.get("VIBE_WORKER_KEY"):
+        return [*codex_auth_args(), "-a", "never", "exec", "--ignore-user-config", "--ignore-rules",
+                "--ephemeral", "--sandbox", "read-only", "--disable", "shell_tool", *args[1:]]
+    return args
+
+
+def _model_args(kind: str, model: str = "") -> list[str]:
+    model = (model or "").strip()
+    if kind != "codex" or not model or model == "codex":
+        return []
+    if len(model) > 256 or any(ord(char) < 32 or ord(char) == 127 for char in model):
+        raise RuntimeError("模型名称格式无效")
+    return ["-m", model]
 
 
 def _find_bin(name: str) -> str | None:
@@ -87,7 +119,7 @@ def supported_kinds() -> list[str]:
     return list(_CLI_DEFS.keys())
 
 
-def run_cli(kind: str, system_prompt: str, user_prompt: str) -> str:
+def _run_cli(kind: str, system_prompt: str, user_prompt: str, model: str = "") -> str:
     """起 CLI 子进程，一次性作答，返回纯文本 stdout。失败抛异常。"""
     d = _CLI_DEFS.get(kind)
     bin_path = detect_cli(kind)
@@ -97,7 +129,7 @@ def run_cli(kind: str, system_prompt: str, user_prompt: str) -> str:
         )
 
     combined = f"{system_prompt}\n\n{user_prompt}"
-    env = {**os.environ, **d.get("env", {})}
+    env = codex_env() if kind == "codex" else {**os.environ, **d.get("env", {})}
     tmpdir = tempfile.mkdtemp(prefix="vibe-cli-")
     try:
         stdin_payload: str | None
@@ -114,6 +146,9 @@ def run_cli(kind: str, system_prompt: str, user_prompt: str) -> str:
                 raise RuntimeError(f"提示词过长，超过 {kind} 的命令行参数上限，请改用 Claude / Qwen 或 API 接入。")
             args = [*d["build_args"](None), combined]
             stdin_payload = None
+        if model_args := _model_args(kind, model):
+            args[-1:-1] = model_args  # Codex 的 stdin 标记 `-` 必须留在最后
+        args = _execution_args(kind, args)
 
         try:
             proc = subprocess.run(
@@ -137,7 +172,7 @@ def run_cli(kind: str, system_prompt: str, user_prompt: str) -> str:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
-def run_cli_stream(kind: str, system_prompt: str, user_prompt: str):
+def _run_cli_stream(kind: str, system_prompt: str, user_prompt: str, model: str = ""):
     """流式版：起 CLI 子进程，stdout 边出边 yield 纯文本块。失败抛异常。"""
     d = _CLI_DEFS.get(kind)
     bin_path = detect_cli(kind)
@@ -147,7 +182,7 @@ def run_cli_stream(kind: str, system_prompt: str, user_prompt: str):
         )
 
     combined = f"{system_prompt}\n\n{user_prompt}"
-    env = {**os.environ, **d.get("env", {})}
+    env = codex_env() if kind == "codex" else {**os.environ, **d.get("env", {})}
     tmpdir = tempfile.mkdtemp(prefix="vibe-cli-")
     proc = None
     try:
@@ -164,6 +199,9 @@ def run_cli_stream(kind: str, system_prompt: str, user_prompt: str):
                 raise RuntimeError(f"提示词过长，超过 {kind} 的命令行参数上限，请改用 Claude / Qwen 或 API 接入。")
             args = [*d["build_args"](None), combined]
             stdin_payload = None
+        if model_args := _model_args(kind, model):
+            args[-1:-1] = model_args
+        args = _execution_args(kind, args)
 
         proc = subprocess.Popen(
             [bin_path, *args], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -214,3 +252,19 @@ def run_cli_stream(kind: str, system_prompt: str, user_prompt: str):
         if proc and proc.poll() is None:
             proc.kill()
         shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def run_cli(kind: str, system_prompt: str, user_prompt: str, model: str = "") -> str:
+    if kind != "codex" or not os.environ.get("VIBE_WORKER_KEY"):
+        return _run_cli(kind, system_prompt, user_prompt, model)
+    # One account per worker; serialize credential use with login/logout to avoid resurrection after logout.
+    with credential_lock:
+        return _run_cli(kind, system_prompt, user_prompt, model)
+
+
+def run_cli_stream(kind: str, system_prompt: str, user_prompt: str, model: str = ""):
+    if kind != "codex" or not os.environ.get("VIBE_WORKER_KEY"):
+        yield from _run_cli_stream(kind, system_prompt, user_prompt, model)
+        return
+    with credential_lock:
+        yield from _run_cli_stream(kind, system_prompt, user_prompt, model)

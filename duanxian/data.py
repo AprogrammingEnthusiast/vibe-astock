@@ -97,6 +97,11 @@ def get_market_facts(date: str) -> tuple[str, dict]:
         from . import theme_tree as tt
 
         from . import breadth as bd
+        from . import emotion_metrics as em
+
+        # 历史序列只扫描已落盘原料，必须先准备目标日，不能依赖后续卡片顺带写缓存。
+        em.day_summary(date)
+        fetch_prev_pool(date)
 
         facts = {
             "breadth": bd.market_breadth(date),
@@ -268,7 +273,9 @@ def get_macro_sector_data(date: str) -> str:
 # ============ ③ 题材热点（涨停原因题材串）============
 def get_theme_reasons(date: str) -> str:
     try:
-        reasons, err = dr.fetch_zt_reasons(_ymd(date))
+        from .theme_tree import reasons_of
+
+        reasons, err = reasons_of(date)
         if not reasons:
             return _degrade_msg("题材涨停原因", date, f"涨停原因题材串未取到：{err}")
         tags = Counter()

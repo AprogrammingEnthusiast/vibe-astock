@@ -6,15 +6,18 @@ import html
 import json
 import os
 import re
+import signal
+import subprocess
 import sys
 import threading
 import time
 import uuid
+from functools import wraps
 from contextlib import asynccontextmanager
 from typing import Optional
 from urllib.parse import urlparse
 
-from fastapi import Body, FastAPI, Request
+from fastapi import Body, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -48,6 +51,8 @@ _ALLOWED_HOSTS = {"127.0.0.1", "localhost"} | {
 }
 
 app = FastAPI(title="短线每日复盘")
+
+import sharing_worker
 
 # ---------------------------------------------------------------- 并入 VR 后端
 # 盘面数据 / 首板分析 / 盯盘 / 持仓股 / 自选股 / 个股数据 / 资讯雷达 这几个分栏的
@@ -407,11 +412,6 @@ def _origin_ok(request: Request) -> bool:
     return (urlparse(ref).hostname or "") in _ALLOWED_HOSTS
 
 
-def _force_flag(request: Request) -> bool:
-    """`?force=1` —— 已复盘过还要重跑。只认 POST 上的查询参数（本路由本身是 POST）。"""
-    return str(request.query_params.get("force", "")).strip().lower() in ("1", "true", "yes")
-
-
 @app.post("/api/review/run")
 def api_run(request: Request, date: str | None = None):
     if not _origin_ok(request):
@@ -438,13 +438,16 @@ def api_run(request: Request, date: str | None = None):
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
 
-    # 那一场已经复盘过就别重跑 —— 直接告诉前端去看那天的页面。
-    # 想重跑：带 force=1（改了口径/修了 bug 时才需要）。
-    if not _force_flag(request) and review_store.usable(review_store.load(date)):
-        return {"running": False, "date": date, "already_done": True,
-                "message": f"{date} 已复盘"}
-
     with _lock:  # 原子 check-then-act（#5）
+        try:
+            shared = sharing_worker.shared_review(date) if sharing_worker.ENABLED else None
+        except RuntimeError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=503)
+        if (shared and review_store.complete(shared)) or review_store.complete(review_store.load(date)):
+            return {"running": False, "date": date, "already_done": True,
+                    "message": f"{date} 当日已完成复盘"}
+        if sharing_worker.ENABLED and not sharing_worker.selected_llm():
+            return JSONResponse({"error": "请先连接你自己的 AI"}, status_code=400)
         if _job["running"] and not _job_stuck(_job, _JOB_TIMEOUT):
             return {"running": True, "date": _job["date"]}
         if _job["running"]:   # 卡死的旧任务：让位，并把原因如实写进 error
@@ -454,6 +457,190 @@ def api_run(request: Request, date: str | None = None):
                     started=time.time(), elapsed=0, finished_at=None)
     threading.Thread(target=_run_review, args=(date, job_id), daemon=True).start()
     return {"running": True, "date": date, "job_id": job_id}
+
+
+_CODEX_LOGIN_TIMEOUT = 10 * 60
+_codex_login_lock = threading.Lock()
+_codex_login: dict = {"process": None, "deviceAuth": None, "failed": False}
+_ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+
+
+def _codex_command() -> list[str]:
+    live = sys.modules.get("app")
+    find_bin = getattr(getattr(live, "cli_runtime", None), "_find_bin", None)
+    if not find_bin:
+        return []
+    for name in _ALL_CLI_BINS.get("codex", []):
+        if hit := find_bin(name):
+            return [hit, *live.cli_runtime.codex_auth_args()]
+    return []
+
+
+def _codex_home() -> str:
+    return os.environ.get("CODEX_HOME") or os.path.expanduser("~/.codex")
+
+
+def _codex_env() -> dict:
+    if sharing_worker.ENABLED:
+        return sys.modules["app"].cli_runtime.codex_env()
+    return {**os.environ, "CODEX_HOME": _codex_home()}
+
+
+def _codex_authenticated(command: list[str]) -> bool:
+    if not command:
+        return False
+    try:
+        return subprocess.run(
+            [*command, "login", "status"], stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            env=_codex_env(), timeout=5,
+        ).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def _codex_models(command: list[str]) -> list[str]:
+    if not command:
+        return []
+    try:
+        result = subprocess.run(
+            [*command, "debug", "models"], stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+            encoding="utf-8", errors="replace",
+            env=_codex_env(), timeout=10,
+        )
+        catalog = json.loads(result.stdout) if result.returncode == 0 else {}
+        rows = catalog.get("models", []) if isinstance(catalog, dict) else []
+        listed = [row for row in rows if isinstance(row, dict)
+                  and row.get("visibility") == "list"
+                  and isinstance(row.get("slug"), str)
+                  and re.fullmatch(r"[A-Za-z0-9._/-]{1,128}", row["slug"])]
+        listed.sort(key=lambda row: row.get("priority")
+                    if isinstance(row.get("priority"), (int, float)) else float("inf"))
+        return list(dict.fromkeys(row["slug"] for row in listed))
+    except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError):
+        return []
+
+
+def _terminate_codex_login(process: subprocess.Popen) -> None:
+    if process.poll() is not None:
+        return
+    try:
+        if os.name == "nt":
+            subprocess.run(
+                ["taskkill.exe", "/PID", str(process.pid), "/T", "/F"],
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL, timeout=5,
+            )
+        else:
+            os.killpg(process.pid, signal.SIGKILL)
+    except (OSError, subprocess.TimeoutExpired):
+        process.kill()
+
+
+def _watch_codex_login(process: subprocess.Popen) -> None:
+    prompt = ""
+    returncode = -1
+    timer = threading.Timer(_CODEX_LOGIN_TIMEOUT, _terminate_codex_login, args=(process,))
+    timer.daemon = True
+    timer.start()
+    try:
+        assert process.stdout is not None
+        for chunk in iter(lambda: process.stdout.read1(4096), b""):
+            prompt = (prompt + chunk.decode("utf-8", errors="replace"))[-8192:]
+            plain = _ANSI_RE.sub("", prompt)
+            code = re.search(
+                r"Enter this one-time code[^\n]*\r?\n[ \t]*([A-Z0-9-]{6,20})[ \t]*\r?\n",
+                plain,
+            )
+            if code and "https://auth.openai.com/codex/device" in plain:
+                with _codex_login_lock:
+                    if _codex_login["process"] is process:
+                        _codex_login["deviceAuth"] = {
+                            "verificationUrl": "https://auth.openai.com/codex/device",
+                            "userCode": code.group(1),
+                        }
+                prompt = ""
+        returncode = process.wait()
+    except Exception:  # pragma: no cover - defensive cleanup for broken pipes
+        _terminate_codex_login(process)
+    finally:
+        timer.cancel()
+        with _codex_login_lock:
+            if _codex_login["process"] is process:
+                _codex_login.update(
+                    process=None, deviceAuth=None, failed=returncode != 0,
+                )
+
+
+def _codex_account_change(fn):
+    @wraps(fn)
+    def guarded(*args, **kwargs):
+        if not sharing_worker.ENABLED:
+            return fn(*args, **kwargs)
+        lock = sys.modules["app"].cli_runtime.credential_lock
+        if not lock.acquire(blocking=False):
+            raise HTTPException(409, "正在使用你的 Codex，请等待当前请求结束")
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            lock.release()
+    return guarded
+
+
+@app.post("/api/cli/codex/login")
+@_codex_account_change
+def api_codex_login(request: Request):
+    if not _origin_ok(request):
+        return JSONResponse({"error": "非法来源"}, status_code=403)
+    if "codex" not in _ALLOWED_CLI_KINDS:
+        return JSONResponse(
+            {"error": "Codex CLI 未放行，请设置 VIBE_ALLOW_UNSAFE_CLI=codex"},
+            status_code=403,
+        )
+    command = _codex_command()
+    if not command:
+        return JSONResponse({"error": "Codex CLI 未安装"}, status_code=409)
+    with _codex_login_lock:
+        current = _codex_login["process"]
+        if current is not None and current.poll() is None:
+            return {"state": "pending"}
+        env = _codex_env()
+        try:
+            process = subprocess.Popen(
+                [*command, "login", "--device-auth"], stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env,
+                start_new_session=os.name != "nt",
+                creationflags=(subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0),
+            )
+        except OSError:
+            return JSONResponse({"error": "Codex 登录进程启动失败"}, status_code=500)
+        _codex_login.update(process=process, deviceAuth=None, failed=False)
+    threading.Thread(target=_watch_codex_login, args=(process,), daemon=True).start()
+    return {"state": "started"}
+
+
+@app.post("/api/cli/codex/logout")
+@_codex_account_change
+def api_codex_logout(request: Request):
+    if not _origin_ok(request):
+        raise HTTPException(403, "非法来源")
+    if _job["running"] or _dd_job["running"]:
+        raise HTTPException(409, "请等待当前分析任务结束后再断开订阅")
+    with _codex_login_lock:
+        process = _codex_login["process"]
+        if process is not None:
+            _terminate_codex_login(process)
+        _codex_login.update(process=None, deviceAuth=None, failed=False)
+    command = _codex_command()
+    if command:
+        result = subprocess.run([*command, "logout"], env=_codex_env(),
+                                capture_output=True, timeout=10)
+        if result.returncode:
+            raise HTTPException(502, "断开失败，请重试")
+    if sharing_worker.ENABLED:
+        sharing_worker.write_profile(None)
+    return {"ok": True}
 
 
 @app.get("/api/cli/available")
@@ -468,12 +655,39 @@ def api_cli_available():
         # 被摘掉的 kind 用不了 `detect_cli`（它读的就是被摘空的那个 dict），
         # 所以直接拿摘除前记下的可执行名去找。
         installed = bool(find_bin and any(find_bin(b) for b in bins))
-        out.append({
+        item = {
             "kind": kind,
             "allowed": allowed,
             "installed": installed,
             "reason": None if allowed else "自动批准 / 无沙箱，默认禁用",
-        })
+        }
+        if kind == "codex":
+            command = _codex_command()
+            authenticated = _codex_authenticated(command)
+            models = _codex_models(command) if authenticated else []
+            with _codex_login_lock:
+                pending = (_codex_login["process"] is not None
+                           and _codex_login["process"].poll() is None)
+                device_auth = _codex_login["deviceAuth"] if pending else None
+                failed = _codex_login["failed"]
+            status = ("ready" if authenticated else "login_pending" if pending
+                      else "login_failed" if failed else "not_authenticated")
+            item.update({
+                "authenticated": authenticated,
+                "status": status,
+                "model": models[0] if models else None,
+                "models": models,
+                "detail": (
+                    "Codex 已登录，可使用 ChatGPT 订阅" if authenticated else
+                    "请打开授权链接并输入一次性验证码" if device_auth else
+                    "正在获取设备授权码" if pending else
+                    "Codex 登录未完成，请重新登录" if failed else
+                    "Codex 尚未登录"
+                ),
+            })
+            if device_auth:
+                item["deviceAuth"] = device_auth
+        out.append(item)
     return {
         "clis": out,
         # 放开的办法，直接告诉调用方，不用去翻文档
@@ -489,6 +703,8 @@ def api_status():
     if snap["running"] and snap["started"]:
         snap["elapsed"] = int(time.time() - snap["started"])
     snap.pop("started", None)
+    if sharing_worker.ENABLED:
+        snap["publication_pending"] = any(sharing_worker.OUTBOX.glob("*.json"))
     return snap
 
 
@@ -592,6 +808,7 @@ def api_latest(date: Optional[str] = None):
         payload["scoreboard"] = reflection.scoreboard()
     except Exception as exc:  # noqa: BLE001  战绩算不出来不该让整个复盘打不开
         print(f"⚠️ 战绩统计失败：{type(exc).__name__}: {exc}")
+    payload["complete"] = review_store.complete(payload)
     return JSONResponse(payload)
 
 
@@ -714,6 +931,8 @@ def _sanitize_messages(msgs: object) -> tuple[list, Optional[str]]:
 
 def _chat_model():
     global _chat_llm
+    if sharing_worker.ENABLED:
+        return make_llm(deep=False)
     if _chat_llm is None:
         _chat_llm = make_llm(deep=False)
     return _chat_llm
@@ -732,8 +951,8 @@ def _load_latest_json(dirpath: str) -> dict:
         return {}
 
 
-def _review_context() -> str:
-    d = _load_latest_json(_REVIEW_DIR)
+def _review_context(version: str | None = None) -> str:
+    d = sharing_worker.shared_review(version=version) if sharing_worker.ENABLED else _load_latest_json(_REVIEW_DIR)
     if not d:
         return "（暂无复盘数据，请先在复盘 Agent 生成一次复盘。）"
     parts = [f"复盘交易日 {d.get('target_date', '')}", f"【明天关注点】\n{d.get('focus_md', '')}"]
@@ -766,7 +985,10 @@ def api_review_chat(request: Request, body: dict = Body(...)):
     msgs, err = _sanitize_messages(body.get("messages"))
     if err:
         return JSONResponse({"error": err}, status_code=400)
-    return _chat(_review_context(), "A 股短线复盘助手", msgs)
+    version = body.get("reviewVersion")
+    if version is not None and (not isinstance(version, str) or not re.fullmatch(r"[a-f0-9]{64}", version)):
+        raise HTTPException(400, "复盘版本无效")
+    return _chat(_review_context(version), "A 股短线复盘助手", msgs)
 
 
 def index():
@@ -1325,6 +1547,8 @@ def _run_dd(stock: str, job_id: str) -> None:
             _atomic_write(safe_join(_DD_DIR, "latest.json"), payload)
             if payload.get("code"):
                 _atomic_write(safe_join(_DD_DIR, f"{payload['code']}.json"), payload)
+            if sharing_worker.ENABLED:
+                sharing_worker.queue_publication(payload)
     except Exception as exc:  # noqa: BLE001
         error = f"{type(exc).__name__}: {exc}"
     finally:
@@ -1381,7 +1605,7 @@ def api_dd_latest():
 
 
 def _deepdive_context() -> str:
-    d = _load_latest_json(_DD_DIR)
+    d = sharing_worker.shared_review(kind="deepdive") if sharing_worker.ENABLED else _load_latest_json(_DD_DIR)
     if not d:
         return "（暂无个股深挖数据，请先在个股深挖 Agent 深挖一只票。）"
     parts = [f"标的 {d.get('name', '')}（{d.get('code', '')}）", f"【深挖结论】\n{d.get('verdict_md', '')}"]
@@ -1492,10 +1716,22 @@ def _start_intraday() -> None:
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
     _start_intraday()
-    yield
+    publication_stop = threading.Event()
+    if sharing_worker.ENABLED:
+        sharing_worker.start_publication_sync(publication_stop)
+    try:
+        yield
+    finally:
+        publication_stop.set()
+        with _codex_login_lock:
+            process = _codex_login["process"]
+        if process is not None:
+            _terminate_codex_login(process)
 
 
 app.router.lifespan_context = _lifespan
+
+sharing_worker.install(app)
 
 
 @app.get("/api/intraday/auction")

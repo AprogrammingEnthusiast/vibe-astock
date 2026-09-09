@@ -9,6 +9,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { SaveNoteButton } from "@/components/ui/SaveNoteButton";
 import { hasLlm, chatStream } from "@/lib/llm";
+import { accountKey } from "@/lib/account";
 
 const TOOL_LABEL: Record<string, string> = {
   query_quote: "查行情",
@@ -32,7 +33,7 @@ type Store = Record<string, DiveRecord>; // key = `${date}|${ns}|${code}`
 
 function loadStore(): Store {
   try {
-    const v = JSON.parse(localStorage.getItem(STORE_KEY) || "{}");
+    const v = JSON.parse(localStorage.getItem(accountKey(STORE_KEY)) || "{}");
     return v && typeof v === "object" ? v : {};
   } catch {
     return {};
@@ -48,7 +49,7 @@ function persistStore(store: Store) {
     if (keep.has(k.split("|")[0])) next[k] = v;
   }
   try {
-    localStorage.setItem(STORE_KEY, JSON.stringify(next));
+    localStorage.setItem(accountKey(STORE_KEY), JSON.stringify(next));
   } catch {
     // 容量超限等：放弃本次持久化，不影响页面内状态
   }

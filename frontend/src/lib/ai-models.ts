@@ -99,6 +99,12 @@ export interface CliStatus {
   allowed: boolean;    // 服务端放行了吗（默认只有 claude；`VIBE_ALLOW_UNSAFE_CLI` 可放开）
   installed: boolean;  // 本机装了这个命令吗
   reason: string | null;
+  authenticated?: boolean;
+  status?: "ready" | "not_authenticated" | "login_pending" | "login_failed";
+  detail?: string;
+  model?: string | null;
+  models?: string[];
+  deviceAuth?: { verificationUrl: string; userCode: string };
 }
 
 export interface CliAvailability {
@@ -117,6 +123,30 @@ export async function fetchCliAvailability(
   } catch {
     return null;
   }
+}
+
+export async function startCodexDeviceAuth(
+  headers: Record<string, string> = {},
+): Promise<{ state: "started" | "pending" }> {
+  const r = await fetch(apiUrl("/api/cli/codex/login"), { method: "POST", headers });
+  const payload = await r.json();
+  if (!r.ok) throw new Error(payload?.error || `HTTP ${r.status}`);
+  return payload;
+}
+
+export async function fetchApiModels(
+  baseURL: string,
+  apiKey: string,
+  headers: Record<string, string> = {},
+): Promise<string[]> {
+  const r = await fetch(apiUrl("/api/ai/models"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...headers },
+    body: JSON.stringify({ baseURL, apiKey }),
+  });
+  const payload = await r.json();
+  if (!r.ok) throw new Error(payload?.detail || payload?.error || `HTTP ${r.status}`);
+  return Array.isArray(payload?.models) ? payload.models : [];
 }
 
 export type CliAvailState = "idle" | "loading" | "ready" | "failed";
@@ -145,5 +175,5 @@ export function serverAllowsCli(p: ProviderId): boolean | undefined {
   if (!isCliProvider(p)) return true;   // API 接入不受这道闸管
   if (_cliAvailState !== "ready" || !_cliAvail) return undefined;
   const st = _cliAvail.clis.find((c) => c.kind === cliKindOf(p));
-  return st ? st.allowed && st.installed : false;   // 服务端不认识 = 不能用
+  return st ? st.allowed && st.installed && (p !== "cli-codex" || st.authenticated === true) : false;
 }

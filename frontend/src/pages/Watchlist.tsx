@@ -26,19 +26,21 @@ export function Watchlist() {
   };
   useEffect(() => { refresh(loadWatch()); }, []);
 
-  const add = () => {
+  const add = async () => {
     const { next, added } = addCodes(codes, input);
     if (added === 0) {
       setHint(input.trim() ? "没识别到新的 6 位代码（可能已在自选里）" : null);
       setInput("");
       return;
     }
-    setCodes(next); saveWatch(next); setInput(""); setHint(`已添加 ${added} 只`);
+    try { await saveWatch(next); } catch (e) { setHint(e instanceof Error ? e.message : "保存失败"); return; }
+    setCodes(next); setInput(""); setHint(`已添加 ${added} 只`);
     refresh(next);
   };
-  const remove = (c: string) => {
+  const remove = async (c: string) => {
     const next = codes.filter((x) => x !== c);
-    setCodes(next); saveWatch(next); refresh(next);
+    try { await saveWatch(next); } catch (e) { setHint(e instanceof Error ? e.message : "保存失败"); return; }
+    setCodes(next); refresh(next);
   };
 
   const aiContext = useMemo(

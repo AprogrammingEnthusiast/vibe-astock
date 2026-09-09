@@ -3,7 +3,10 @@ import { apiUrl } from "./base";
 
 export async function agentFetch<T>(path: string, method: "GET" | "POST" = "GET"): Promise<T> {
   const r = await fetch(apiUrl(path), { method });
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  if (!r.ok) {
+    const error = await r.json().catch(() => ({}));
+    throw new Error(error.detail || error.error || `HTTP ${r.status}`);
+  }
   return (await r.json()) as T;
 }
 
@@ -13,7 +16,10 @@ export async function agentPost<T>(path: string, body: unknown): Promise<T> {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  if (!r.ok) {
+    const error = await r.json().catch(() => ({}));
+    throw new Error(error.detail || error.error || `HTTP ${r.status}`);
+  }
   return (await r.json()) as T;
 }
 
@@ -365,6 +371,8 @@ export interface Scoreboard {
 
 export interface AnalystReport { key: string; title: string; tag: string; html: string; }
 export interface ReviewData {
+  publication?: { id: string; author: string; published_at: number; shared: boolean };
+  complete?: boolean;
   target_date?: string;
   trade_date?: string;
   generated_at?: string;
@@ -408,7 +416,7 @@ export interface WeeklyData {
   leader_lineage: LineageLeader[];
 }
 
-export interface JobStatus { running: boolean; elapsed?: number; error?: string | null; stock?: string; busy?: boolean; }
+export interface JobStatus { running: boolean; elapsed?: number; error?: string | null; stock?: string; busy?: boolean; publication_pending?: boolean; }
 
 // ---------- 交易日志（journal.py）----------
 export interface MarketCtx {

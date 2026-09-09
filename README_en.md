@@ -33,16 +33,6 @@
 
 ---
 
-## Open to AI Roles in Shenzhen
-
-The author is open to AI roles in Shenzhen, particularly in **AI-powered investment research products, Forward Deployed Engineering (FDE), and AI consulting or solutions** at Tencent, other leading technology companies, and financial institutions.
-
-He combines experience in financial institutions with hands-on AI product development, building open-source market data tools and multi-agent systems with **17K+ GitHub stars**.
-
-Contact: [simonlin0423@gmail.com](mailto:simonlin0423@gmail.com)
-
----
-
 ## What it is
 
 **It finishes today's review for you.**
@@ -482,9 +472,8 @@ For a CLI other than `claude` you still need the second switch (PowerShell:
 This assumes the CLI is already installed and logged in — typing `claude` in the
 same terminal should drop you into it. The backend only looks it up on PATH and
 reuses that session; it will not log in for you. If `claude` runs fine on its own
-but the server reports "not detected" or fails to start, please paste the full
-error into an [issue](https://github.com/simonlin1212/vibe-astock/issues) along
-with your Windows version and how the CLI was installed (npm / installer).
+but the server reports "not detected" or fails to start, record the full
+error along with your Windows version and how the CLI was installed (npm / installer) for troubleshooting.
 
 </details>
 
@@ -578,16 +567,6 @@ and **no module that feeds a prompt may import the personal-data modules**.
 > - The author accepts no liability for any loss arising from use of this tool
 > - Markets carry risk; invest with care
 
-## Support
-
-If you find it useful, you can buy me a coffee ☕
-
-<p align="center">
-  <a href="https://buymeacoffee.com/simonlin1212"><img src="./assets/bmc-qr.png" width="180" alt="Buy Me a Coffee"></a>
-</p>
-
 ## License
 
 Apache-2.0, see [LICENSE](LICENSE).
-
-**Author:** Simon Lin · X [@linsizhen](https://x.com/linsizhen) · Email: [simonlin0423@gmail.com](mailto:simonlin0423@gmail.com)

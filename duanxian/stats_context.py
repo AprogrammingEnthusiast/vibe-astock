@@ -165,6 +165,9 @@ def series(days: int = 30, end: Optional[str] = None) -> list[dict]:
     key = (days, end)
     settled = trade_calendar.is_settled(end)
     window = trade_calendar.trade_dates_ending_at(end, days)
+    # 参考股日线可能晚于收盘池更新；已有定稿原料的目标日不能被日历漏掉。
+    if settled and end not in window and end in _cached_days():
+        window = sorted([*window, end])[-days:]
     state = _window_state(window)
     if settled and key in _SERIES_CACHE:
         rows, cached_state = _SERIES_CACHE[key]
@@ -196,6 +199,8 @@ def trend(days: int = 10, end: Optional[str] = None) -> dict:
     rows = series(max(days, _MIN_SAMPLES), end=end)
     if not rows:
         return {"available": False, "reason": "历史读数序列为空（缓存还没囤起来）"}
+    if end and rows[-1]["date"] != end:
+        return {"available": False, "reason": f"{end} 无缓存读数（历史趋势仅到 {rows[-1]['date']}）"}
     rows = rows[-days:]
     return {
         "available": True,

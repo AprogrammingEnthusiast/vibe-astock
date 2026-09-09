@@ -1,6 +1,7 @@
 import { apiUrl } from "@/lib/base";
+import { sharedWebsite } from "@/lib/account";
 import { useEffect, useRef, useState } from "react";
-import { Swords, Loader2, AlertTriangle, Target, CheckSquare } from "lucide-react";
+import { Swords, Loader2, AlertTriangle, Target, CheckSquare, CalendarDays } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { AgentChat } from "@/components/AgentChat";
 import {
@@ -151,9 +152,11 @@ function UserConditions({ date }: { date: string }) {
 export function AgentReview() {
   const [data, setData] = useState<ReviewData | null>(null);
   const [running, setRunning] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [elapsed, setElapsed] = useState(0);
   const [date, setDate] = useState<string>(localDate());
   const [dates, setDates] = useState<string[]>([]);   // 跑过复盘的交易日（历史入口）
+  const [versions, setVersions] = useState<{ id: string; author: string; published_at: number }[]>([]);
   const [missing, setMissing] = useState<string>("");  // 选了某天但那天没跑过
   const [err, setErr] = useState("");
   // 「已复盘/还没收盘」这类不是错误、是正常告知，跟 err 分开显示
@@ -165,6 +168,7 @@ export function AgentReview() {
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const alive = useRef(true);
   const reqId = useRef(0);
+  const dateInput = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     alive.current = true;
@@ -175,10 +179,14 @@ export function AgentReview() {
   }, []);
 
   /** 读复盘：不传 d 读最近一份；传 d 读那天的历史存档。 */
-  async function loadLatest(d?: string) {
+  async function loadLatest(d?: string, version?: string) {
     const my = ++reqId.current;
+    setLoading(true);
     try {
-      const r = await agentFetch<ReviewData>(`/api/review/latest${d ? `?date=${d}` : ""}`);
+      const query = new URLSearchParams();
+      if (d) query.set("date", d);
+      if (version) query.set("version", version);
+      const r = await agentFetch<ReviewData>(`/api/review/latest?${query}`);
       if (!alive.current || my !== reqId.current) return;   // 已卸载 / 有更新的请求 → 丢弃
       if (r && (r.target_date || r.trade_date)) {
         setData(r); setMissing("");
@@ -188,7 +196,12 @@ export function AgentReview() {
       }
       else if (d) { setData(null); setMissing(d); }         // 这天没跑过 —— 要说出来，不能默默留着上一天的
     } catch {
-      if (alive.current && my === reqId.current) setErr("读取历史复盘失败，仍可尝试重新生成");
+      if (alive.current && my === reqId.current) {
+        setData(null);
+        setErr("读取历史复盘失败，仍可尝试重新生成");
+      }
+    } finally {
+      if (alive.current && my === reqId.current) setLoading(false);
     }
   }
 
@@ -202,6 +215,14 @@ export function AgentReview() {
 
   useEffect(() => { loadLatest(); loadDates(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, []);
 
+  useEffect(() => {
+    if (!sharedWebsite || !date) return;
+    let live = true;
+    agentFetch<{ versions: typeof versions }>(`/api/review/versions?date=${date}`)
+      .then(r => { if (live) setVersions(r.versions); }).catch(() => { if (live) setVersions([]); });
+    return () => { live = false; };
+  }, [date, data?.publication?.id]);
+
   function stopPolling() {
     polling.current = false;
     if (alive.current) setRunning(false);
@@ -214,20 +235,29 @@ export function AgentReview() {
       if (!alive.current) return;
       setElapsed(st.elapsed || 0);
       if (st.running) { timer.current = setTimeout(pollOnce, 3000); return; }
+      if (st.publication_pending && !st.error) {
+        setNotice("分析已保存，正在同步公共复盘；同步完成后其他成员即可查看。");
+        timer.current = setTimeout(pollOnce, 3000); return;
+      }
       stopPolling();
-      if (st.error) setErr(st.error); else loadLatest();
+      if (st.error) setErr(st.error); else { loadLatest(); loadDates(); }
     } catch { stopPolling(); if (alive.current) setErr("状态查询失败"); }
   }
 
+  const selectedReview = data && (data.target_date || data.trade_date) === date ? data : null;
+  const completed = selectedReview?.complete === true;
+
   async function generate() {
-    if (running || polling.current) return;
+    if (running || polling.current || loading || completed || !date) return;
     polling.current = true;
     setRunning(true); setErr(""); setNotice(""); setElapsed(0);
     // 这里不用 agentFetch：它只抛 `HTTP 4xx`，会把「已复盘」「还没收盘」
     // 这些**需要原样告诉用户**的信息丢掉。
     let resp: Response;
     try {
-      resp = await fetch(apiUrl(`/api/review/run${date ? `?date=${date}` : ""}`), { method: "POST" });
+      const query = new URLSearchParams();
+      if (date) query.set("date", date);
+      resp = await fetch(apiUrl(`/api/review/run?${query}`), { method: "POST" });
     } catch { stopPolling(); if (alive.current) setErr("启动失败"); return; }
     const body = await resp.json().catch(() => null);
     if (!alive.current) return;
@@ -242,7 +272,7 @@ export function AgentReview() {
     if (!resp.ok) { stopPolling(); setErr(body?.error || "启动失败"); return; }
     if (body?.already_done) {
       stopPolling();
-      setNotice(`${body.date} 已复盘，下面就是那天的结果`);
+      setNotice(`${body.date} 当日已完成复盘`);
       setDate(body.date); loadLatest(body.date);
       return;
     }
@@ -265,13 +295,26 @@ export function AgentReview() {
           <p className="mt-0.5 text-sm text-muted-foreground">
             情绪温度 · 明日验证条件
             {data && ` · 交易日 ${data.target_date || data.trade_date} · 生成于 ${data.generated_at}`}
+            {data?.publication && ` · ${data.publication.author} 分享 · 阅读不消耗 AI 额度`}
           </p>
+          {versions.length > 1 && <label className="mt-2 block text-xs text-muted-foreground">查看共享版本
+            <select aria-label="共享复盘版本" className="ml-2 max-w-full rounded border border-border bg-card p-2" value={data?.publication?.id ?? ""}
+              onChange={e => void loadLatest(date, e.target.value)}>
+              {versions.map(v => <option key={v.id} value={v.id}>{v.author} · {new Date(v.published_at * 1000).toLocaleString("zh-CN")}</option>)}
+            </select>
+          </label>}
         </div>
         <div className="flex items-center gap-2">
           <div className="flex flex-col items-start">
-            <input type="date" value={date} list="review-dates"
-              onChange={(e) => { const v = e.target.value; setDate(v); setErr(""); if (v) loadLatest(v); }}
-              className="rounded-lg border border-border bg-card px-3 py-2 text-sm" />
+            <div className="relative">
+              <input ref={dateInput} type="date" value={date} list="review-dates" aria-label="复盘日期"
+                onChange={(e) => { const v = e.target.value; setDate(v); setErr(""); setNotice(""); if (v) loadLatest(v); }}
+                className="rounded-lg border border-border bg-card py-2 pl-3 pr-9 text-sm [&::-webkit-calendar-picker-indicator]:opacity-0" />
+              <button type="button" aria-label="打开日期选择器" onClick={() => dateInput.current?.showPicker()}
+                className="absolute inset-y-0 right-0 flex w-9 items-center justify-center rounded-r-lg text-primary hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/60">
+                <CalendarDays aria-hidden="true" className="h-4 w-4" />
+              </button>
+            </div>
             {/* 跑过的日子直接列出来 —— 不然用户只能靠猜哪天有存档 */}
             <datalist id="review-dates">
               {dates.map((d) => <option key={d} value={d} />)}
@@ -279,7 +322,7 @@ export function AgentReview() {
             {dates.length > 1 && (
               <div className="mt-1 flex flex-wrap gap-1 text-[10px] text-muted-foreground">
                 {dates.slice(0, 5).map((d) => (
-                  <button key={d} onClick={() => { setDate(d); setErr(""); loadLatest(d); }}
+                  <button key={d} onClick={() => { setDate(d); setErr(""); setNotice(""); loadLatest(d); }}
                     className={`rounded px-1.5 py-0.5 transition-colors hover:text-primary ${
                       (data?.target_date || data?.trade_date) === d ? "bg-primary/15 text-primary" : "bg-muted/40"
                     }`}>{d.slice(5)}</button>
@@ -287,10 +330,10 @@ export function AgentReview() {
               </div>
             )}
           </div>
-          <button onClick={generate} disabled={running}
+          <button onClick={generate} disabled={running || loading || completed || !date}
             className="flex items-center gap-1.5 rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-50">
             {running && <Loader2 className="h-4 w-4 animate-spin" />}
-            {running ? `复盘中 ${elapsed}s` : "生成复盘"}
+            {running ? `复盘中 ${elapsed}s` : loading ? "读取复盘中" : completed ? "当日已完成复盘" : "生成复盘"}
           </button>
         </div>
       </div>
@@ -456,7 +499,8 @@ export function AgentReview() {
       {data && (
         <AgentChat
           // 换交易日即重建组件，避免旧对话串到新复盘
-          key={data.target_date || data.trade_date}
+          key={data.publication?.id || data.target_date || data.trade_date}
+          reviewVersion={data.publication?.id}
           endpoint="/api/review/chat"
           placeholder="就今天的复盘追问，如：展开电网设备的接力逻辑"
           suggestions={["最强主线今天的梯队结构是怎样的", "当前情绪处在周期哪个阶段", "各方向的龙头晋级还是断板了", "判断退潮要盯哪些数据信号"]}

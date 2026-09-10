@@ -62,6 +62,96 @@ def test_csrf_invite_reuse_and_failed_logins(site):
     assert fresh.get("/api/journal").status_code == 401
 
 
+@pytest.mark.parametrize("new_password", ["a" * 12, "b" * 256])
+def test_change_password_revokes_all_own_sessions_only(site, new_password):
+    alice, bob = site
+    old_cookie = alice.cookies.get(sharing.COOKIE)
+    with TestClient(sharing.app, headers={"X-Vibe-Request": "1"}) as other:
+        assert other.post("/api/account/login", json={
+            "username": "alice", "password": "a-good-test-password"}).status_code == 200
+        response = alice.put("/api/account/password", json={
+            "current_password": "a-good-test-password", "new_password": new_password,
+            "user_id": bob.headers["X-Vibe-Account"], "username": "bobby"})
+        assert response.status_code == 200, response.text
+        assert "max-age=0" in response.headers["set-cookie"].lower()
+        assert alice.get("/api/account/me", headers={
+            "Cookie": f"{sharing.COOKIE}={old_cookie}"}).json()["user"] is None
+        assert other.get("/api/account/me").json()["user"] is None
+        assert bob.get("/api/account/me").json()["user"]["username"] == "bobby"
+        assert other.post("/api/account/login", json={
+            "username": "alice", "password": "a-good-test-password"}).status_code == 401
+        assert other.post("/api/account/login", json={
+            "username": "alice", "password": new_password}).status_code == 200
+
+
+def test_change_password_validation_and_account_boundary(site):
+    alice, bob = site
+    valid = {"current_password": "a-good-test-password", "new_password": "new-test-password"}
+    for field, value in [("current_password", None), ("current_password", ""),
+                         ("current_password", "x" * 257), ("new_password", []),
+                         ("new_password", "x" * 11), ("new_password", "x" * 257)]:
+        assert alice.put("/api/account/password", json={**valid, field: value}).status_code == 400
+    wrong = alice.put("/api/account/password", json={**valid, "current_password": "incorrect"})
+    assert wrong.status_code == 400  # A bad current password must not trigger the client's 401 reload.
+    assert alice.put("/api/account/password", headers={"Origin": "https://evil.example"}, json=valid).status_code == 403
+    assert alice.put("/api/account/password", headers={"X-Vibe-Request": ""}, json=valid).status_code == 403
+    assert bob.put("/api/account/password", headers={
+        "X-Vibe-Account": alice.headers["X-Vibe-Account"]}, json=valid).status_code == 401
+    assert alice.get("/api/account/me").json()["user"]["username"] == "alice"
+    with TestClient(sharing.app, headers={"X-Vibe-Request": "1"}) as guest:
+        assert guest.put("/api/account/password", json=valid).status_code == 401
+        assert guest.post("/api/account/login", json={
+            "username": "alice", "password": "a-good-test-password"}).status_code == 200
+
+
+def test_change_password_is_rate_limited(site):
+    alice, _ = site
+    for _ in range(10):
+        response = alice.put("/api/account/password", json={
+            "current_password": "incorrect", "new_password": "new-test-password"})
+    assert response.status_code == 429
+    assert alice.get("/api/account/me").json()["user"] is not None
+
+
+def test_change_password_rejects_session_revoked_during_hash(site, monkeypatch):
+    alice, _ = site
+    original = sharing.password_hash
+
+    def revoke(password, salt):
+        with sharing.connect() as db:
+            db.execute("DELETE FROM sessions WHERE user_id=?", (alice.headers["X-Vibe-Account"],))
+        return original(password, salt)
+
+    monkeypatch.setattr(sharing, "password_hash", revoke)
+    response = alice.put("/api/account/password", json={
+        "current_password": "a-good-test-password", "new_password": "new-test-password"})
+    assert response.status_code == 409
+    monkeypatch.setattr(sharing, "password_hash", original)
+    assert alice.post("/api/account/login", json={
+        "username": "alice", "password": "a-good-test-password"}).status_code == 200
+
+
+def test_change_password_blocks_old_login_already_in_progress(site, monkeypatch):
+    alice, _ = site
+    original = sharing.password_hash
+    changed = False
+
+    def change_while_hashing(password, salt):
+        nonlocal changed
+        computed = original(password, salt)
+        if not changed:
+            changed = True
+            assert alice.put("/api/account/password", json={
+                "current_password": "a-good-test-password", "new_password": "new-test-password"}).status_code == 200
+        return computed
+
+    monkeypatch.setattr(sharing, "password_hash", change_while_hashing)
+    with TestClient(sharing.app, headers={"X-Vibe-Request": "1"}) as fresh:
+        assert fresh.post("/api/account/login", json={
+            "username": "alice", "password": "a-good-test-password"}).status_code == 401
+        assert fresh.get("/api/account/me").json()["user"] is None
+
+
 def test_public_review_versions_never_call_ai(site, monkeypatch):
     alice, bob = site
     async def fail_backend(*args):

@@ -155,6 +155,10 @@ def throttle(request: Request, username: str):
 def signed_in(user: dict, previous: str = ""):
     token = secrets.token_urlsafe(32)
     with connect() as db:
+        db.execute("BEGIN IMMEDIATE")
+        if not db.execute("SELECT 1 FROM users WHERE id=? AND password=? AND salt=? AND enabled=1",
+                          (user["id"], user["password"], user["salt"])).fetchone():
+            raise HTTPException(401, "账号凭证已变更，请重新登录")
         db.execute("DELETE FROM sessions WHERE expires<? OR token=?", (time.time(), digest(previous)))
         db.execute("INSERT INTO sessions VALUES (?, ?, ?)", (digest(token), user["id"], time.time() + SESSION_SECONDS))
     response = JSONResponse({"ok": True})
@@ -204,9 +208,39 @@ async def account_action(action: str, request: Request):
             if not changed:
                 raise HTTPException(409, "邀请已使用，请登录")
             db.execute("DELETE FROM sessions WHERE user_id=?", (u["id"],))
+        u["password"] = computed
     elif not u or not hmac.compare_digest(u["password"] or "", computed):
         raise HTTPException(401, "账号或密码错误")
     return signed_in(u, request.cookies.get(COOKIE, ""))
+
+
+@app.put("/api/account/password")
+async def change_password(request: Request):
+    u = user_for(request)
+    body = await json_body(request)
+    current, new = body.get("current_password"), body.get("new_password")
+    if not isinstance(current, str) or not 1 <= len(current) <= 256:
+        raise HTTPException(400, "请输入当前密码（最多 256 个字符）")
+    if not isinstance(new, str) or not 12 <= len(new) <= 256:
+        raise HTTPException(400, "新密码须为 12–256 个字符")
+    await run_in_threadpool(throttle, request, u["username"])
+    computed = await run_in_threadpool(password_hash, current, u["salt"])
+    if not hmac.compare_digest(u["password"] or "", computed):
+        raise HTTPException(400, "当前密码错误")
+    salt = secrets.token_hex(16)
+    hashed = await run_in_threadpool(password_hash, new, salt)
+    with connect() as db:
+        changed = db.execute("""UPDATE users SET password=?, salt=?, invite=NULL
+            WHERE id=? AND password=? AND salt=? AND enabled=1
+            AND EXISTS (SELECT 1 FROM sessions WHERE token=? AND user_id=users.id AND expires>?)""",
+            (hashed, salt, u["id"], u["password"], u["salt"],
+             digest(request.cookies.get(COOKIE, "")), time.time())).rowcount
+        if not changed:
+            raise HTTPException(409, "账号凭证或登录状态已变更，请重新登录")
+        db.execute("DELETE FROM sessions WHERE user_id=?", (u["id"],))
+    response = JSONResponse({"ok": True})
+    response.delete_cookie(COOKIE)
+    return response
 
 
 @app.put("/api/account/watchlist")

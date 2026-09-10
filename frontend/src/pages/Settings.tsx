@@ -1,4 +1,5 @@
 import { AccountPanel } from "@/components/AccountPanel";
+import { Navigate } from "react-router-dom";
 import { sharedWebsite } from "@/lib/account";
 import { useState } from 'react';
 import { KeyRound } from 'lucide-react';
@@ -8,11 +9,20 @@ import { AgentToggle } from '@/components/workspace/AgentToggle';
 import { useWorkspace } from '@/lib/workspace/state';
 import { loadAccessKey, saveAccessKey } from '@/lib/api';
 import { toast } from 'sonner';
+
+export function AccountSettings() {
+  const workspace = useWorkspace();
+  if (!sharedWebsite) return <Navigate to="/settings" replace />;
+  return <div className="space-y-6">
+    <PageHeader title="账号" subtitle="管理你的网站账号与登录密码。" />
+    <AccountPanel refresh={async () => workspace.refresh()} />
+  </div>;
+}
+
 export function Settings() {
   const workspace = useWorkspace();
   const [accessKey, setAccessKey] = useState(loadAccessKey());
   return <div className="space-y-6">
-    <AccountPanel refresh={async () => workspace.refresh()} />
     <PageHeader title="接入 AI" subtitle="选择一个来源，首页、复盘、深挖与页面问答共用。" />
     <section className="glass rounded-2xl p-5"><div className="mb-4 flex items-center justify-between"><h2 className="font-semibold">AI 来源</h2><AgentToggle /></div><AgentAccess onSaved={workspace.refresh} /></section>
     <p className="text-sm text-muted-foreground">旧版分散的 AI 设置不再用于产品调用。原有配置留在本机，没有自动迁移密钥或替换已保存来源。页面问答在 Agent 关闭时仅阅读本次明确提供的材料；开启后可查询公开资料。完整复盘与个股深挖由各自的任务按钮明确发起。</p>

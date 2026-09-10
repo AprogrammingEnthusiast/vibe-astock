@@ -28,7 +28,7 @@ function Shell() {
   const navRef = useRef<HTMLElement>(null);
   const mainRef = useRef<HTMLElement>(null);
   const activeModule = moduleFor(pathname);
-  const title = activeModule?.pages.find(page => page.to === navigationPath(pathname))?.title ?? (pathname === '/settings' ? '接入 AI' : '工作空间');
+  const title = activeModule?.pages.find(page => page.to === navigationPath(pathname))?.title ?? (pathname === '/settings' ? '接入 AI' : pathname === '/settings/account' ? '账号' : '工作空间');
   useEffect(() => { setMobileOpen(false); setChatOpen(false); }, [pathname, search]);
   useEffect(() => {
     const query = window.matchMedia('(min-width: 768px)');
@@ -53,7 +53,7 @@ function Shell() {
       }} />
     </nav>
     <div className={cn('border-t border-border', compact ? 'p-1.5' : 'p-3')}>
-      <Link to="/settings" title="设置" aria-label="设置" aria-current={pathname === '/settings' ? 'page' : undefined} onClick={() => setMobileOpen(false)} className={cn('mb-2 flex min-h-10 items-center gap-2 rounded-lg text-sm text-muted-foreground hover:bg-muted hover:text-foreground', compact ? 'justify-center' : 'px-3')}><Cog className="h-4 w-4" />{!compact && '设置'}</Link>
+      <Link to="/settings" title="设置" aria-label="设置" aria-current={pathname === '/settings' || pathname.startsWith('/settings/') ? 'page' : undefined} onClick={() => setMobileOpen(false)} className={cn('mb-2 flex min-h-10 items-center gap-2 rounded-lg text-sm text-muted-foreground hover:bg-muted hover:text-foreground', compact ? 'justify-center' : 'px-3')}><Cog className="h-4 w-4" />{!compact && '设置'}</Link>
       <div className={cn('flex items-center text-muted-foreground', compact ? 'flex-col gap-3' : 'justify-between gap-2')}>
         {!mobile && <button type="button" onClick={collapse} aria-label={compact ? '展开侧栏' : '收起侧栏'} className="p-1">{compact ? <ChevronsRight className="h-3.5 w-3.5" /> : <ChevronsLeft className="h-3.5 w-3.5" />}</button>}
       </div>{storageError && <p role="alert" className="text-xs text-destructive">{storageError}</p>}

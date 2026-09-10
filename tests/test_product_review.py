@@ -159,6 +159,40 @@ def daily_manager(tmp_path, monkeypatch):
     manager.shutdown()
 
 
+@pytest.mark.parametrize("shared", [False, True])
+@pytest.mark.parametrize("force", [False, True])
+@pytest.mark.parametrize("issue", [None, "warning", "missing", "count", "promotion"])
+def test_daily_only_retries_abnormal_reports(daily_manager, monkeypatch, shared, force, issue):
+    import sharing_worker
+    from duanxian.roles import ROLES
+    report = {"focus": {"text": "ok"}, "warnings": [],
+              "emotion_metrics": {"promotion": {"limit_up_count": 10, "tiers": {"1": {"base": 5, "promoted": 2}}}},
+              "market_facts": {"seal_quality": {"total": 10}, "feedback_matrix": {"matrix": {"首板": {"合计": 5, "晋级涨停": 2}}}},
+              "analysts": [{"key": role.key, "html": "ok"} for role in ROLES]}
+    if issue == "warning":
+        report["warnings"] = ["数据或生成降级"]
+    elif issue == "missing":
+        report["analysts"].pop()
+    elif issue == "count":
+        report["market_facts"]["seal_quality"]["total"] = 0
+    elif issue == "promotion":
+        report["market_facts"]["feedback_matrix"]["matrix"]["首板"]["晋级涨停"] = 3
+    assert review_store.complete(report) == (issue is None)
+    monkeypatch.setattr(sharing_worker, "ENABLED", shared)
+    monkeypatch.setattr(sharing_worker, "shared_review", lambda date: report)
+    monkeypatch.setattr(review_store, "load", lambda date: None if shared else report)
+    calls = []
+    monkeypatch.setattr(daily_manager.daily, "_work", lambda *args: calls.append(args))
+    body = DailyInput(date=DATE, request_id="c" * 32, force=force, llm=SOURCE)
+    with daily_manager.lock:
+        result = daily_manager.daily.submit(body, SOURCE, "")
+    if issue is None:
+        assert result["already_done"] and not calls and daily_manager.daily.worker is None
+    else:
+        daily_manager.daily.worker.join(2)
+        assert result["running"] and len(calls) == 1
+
+
 def test_daily_idempotency_and_cancel_do_not_restart_or_publish(daily_manager, monkeypatch):
     entered = threading.Event()
     from duanxian import preflight

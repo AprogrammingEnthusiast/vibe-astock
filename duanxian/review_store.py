@@ -51,6 +51,16 @@ def complete(payload: Any) -> bool:
         return False
     if not payload.get("emotion_metrics") or not payload.get("market_facts"):
         return False
+    facts = payload["market_facts"]
+    promotion = payload["emotion_metrics"].get("promotion") or {}
+    first = ((facts.get("feedback_matrix") or {}).get("matrix") or {}).get("首板")
+    tier = (promotion.get("tiers") or {}).get("1")
+    if first and tier and first.get("合计") == tier.get("base") and first.get("晋级涨停") != tier.get("promoted"):
+        return False
+    count = promotion.get("limit_up_count")
+    total = (facts.get("seal_quality") or {}).get("total")
+    if count is not None and total is not None and count != total:
+        return False
     reports = {r.get("key"): r.get("html", "").strip()
                for r in (payload.get("analysts") or []) if isinstance(r, dict)}
     return all(reports.get(role.key) for role in ROLES)

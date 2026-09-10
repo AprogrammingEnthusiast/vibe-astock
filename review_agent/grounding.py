@@ -11,6 +11,7 @@ import math
 import re
 import unicodedata
 from decimal import Decimal
+from difflib import get_close_matches
 from types import SimpleNamespace
 
 from .evidence import EvidenceError, METRIC_SCOPE, canonical, digest, display_number, has_generated_number, mask_qualitative_numbers, valid_date
@@ -192,8 +193,18 @@ def _finding(obj, records):
     _keys(obj, ("text", "citations"))
     refs = _items(obj["citations"], 1, 6, "citations")
     allowed = {e["id"] for e in records}
-    if any(not isinstance(eid, str) or eid not in allowed for eid in refs) or len(set(refs)) != len(refs):
-        raise EvidenceError("引用不在本段可用目录内或引用重复")
+    errors = []
+    for index, eid in enumerate(refs):
+        if not isinstance(eid, str) or eid not in allowed:
+            # Suggestions are host-owned IDs, never automatic substitutions:
+            # the model must check their meaning and pass exact membership again.
+            candidates = get_close_matches(eid, sorted(allowed), n=3, cutoff=0.7) if isinstance(eid, str) and len(eid) <= 64 else []
+            errors.append(f"citations[{index}]: 引用不在本段可用目录内；"
+                          + ("相近有效编号=" + canonical(candidates) + "，请核对证据含义后原样复制" if candidates
+                             else "请从本段目录重新选择支持该解释的有效编号"))
+    if errors:
+        raise EvidenceError("；".join(errors))
+    refs = list(dict.fromkeys(refs))
     # Only names in the cited host-formatted ladder rows can mask number-like
     # characters (e.g. 百大集团). Attached quantities remain subject to the gate.
     names = _cited_names(records, refs)

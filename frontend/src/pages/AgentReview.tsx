@@ -321,7 +321,7 @@ export function AgentReview() {
   }
 
   async function generate(force = false) {
-    if (running || polling.current || !date || loadingReport) return;
+    if (running || polling.current || !date || loadingReport || reportComplete) return;
     if (pendingDaily.current && pendingDaily.current.date !== date) {
       setErr(`尚有 ${pendingDaily.current.date} 的启动请求未确认。请先切回该日期核对任务，当前不会生成其他日期。`);
       return;
@@ -345,7 +345,7 @@ export function AgentReview() {
       clearPendingDaily();
       if (!alive.current) return;
       if (body.already_done) {
-        stopPolling(); setNotice(`${body.date} 已有复盘；需要更新时可点重新生成，原版本会保留。`);
+        stopPolling(); setNotice(`${body.date} 已有正常复盘，无告警异常，不可重复生成。`);
         if (body.date && selectedDate.current === body.date) loadLatest(body.date);
         return;
       }
@@ -370,6 +370,7 @@ export function AgentReview() {
     }
   }
 
+  const reportComplete = data?.complete === true;
   const focus = data?.focus;
   // 页面按"用户复盘的顺序"重排后，各卡片散在不同区块里，这里统一取一次
   const facts = data?.market_facts;
@@ -425,17 +426,18 @@ export function AgentReview() {
               </div>
             )}
           </div>
-          <button onClick={() => generate()} disabled={running || !date || loadingReport}
+          <button onClick={() => generate()} disabled={running || !date || loadingReport || reportComplete}
             className="flex items-center gap-1.5 rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-50">
             {running && <Loader2 className="h-4 w-4 animate-spin" />}
-            {running ? `复盘中 ${elapsed}s` : "生成复盘"}
+            {running ? `复盘中 ${elapsed}s` : reportComplete ? "已完成复盘" : "生成复盘"}
           </button>
-          {!running && data && <button onClick={() => generate(true)} className="rounded-lg border border-border px-3 py-2 text-sm">重新生成</button>}
+          {!running && data && !reportComplete && <button disabled={loadingReport} onClick={() => generate(true)} className="rounded-lg border border-border px-3 py-2 text-sm">重新生成</button>}
           {running && jobId && <button onClick={cancelDaily} className="rounded-lg border border-border px-3 py-2 text-sm">取消复盘</button>}
         </div>
       </div>
       {running && <p role="status" className="text-sm text-muted-foreground">复盘日期 {jobDate} · {stage} · 刷新页面可继续查看进度</p>}
 
+      {reportComplete && <p role="status" className="text-sm text-muted-foreground">所选日期已有正常复盘，无告警异常，不可重复生成。</p>}
       {err && <div role="alert" className="glass rounded-xl border-danger/30 px-4 py-3 text-sm text-danger">出错：{err}</div>}
       {taskErr && <div role="status" className="glass rounded-xl border-danger/30 px-4 py-3 text-sm text-danger">{taskErr}</div>}
       {!running && pendingIntent && <div role="status" className="glass rounded-xl px-4 py-3 text-sm text-muted-foreground">

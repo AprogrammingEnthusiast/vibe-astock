@@ -333,7 +333,11 @@ def public_review(date: str | None = None, version: str | None = None, kind: str
                 r.created DESC, r.id DESC LIMIT 1""", (date, date, version, version, kind)).fetchone()
     if not row:
         return {"requested_date": date} if date else {}
-    return {**json.loads(row["payload"]), "publication": {"id": row["id"], "author": row["username"],
+    payload = json.loads(row["payload"])
+    if kind == "review":
+        from duanxian.review_store import complete
+        payload["complete"] = complete(payload)
+    return {**payload, "publication": {"id": row["id"], "author": row["username"],
             "published_at": row["created"], "shared": True}}
 
 

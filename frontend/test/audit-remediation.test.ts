@@ -19,15 +19,15 @@ test('quote and timezone timestamps are readable without guessing ambiguous sour
  assert.equal(beijingTime('2026-09-08 16:00'),'2026-09-08 16:00（原文时间）');
 });
 
-test('watch capacity and blocked storage retain the previous list',()=>{
+test('watch capacity and blocked storage retain the previous list',async()=>{
  const code=ts.transpileModule(fs.readFileSync(new URL('../src/lib/watchlist.ts',import.meta.url),'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText;
  let writes=0;
- const ctx={exports:{},localStorage:{getItem:()=>JSON.stringify(['600000']),setItem:()=>{writes++;throw Error('quota');}}};
+ const ctx={exports:{},require:()=>({accountKey:(key:string)=>key,sharedWebsite:false}),localStorage:{getItem:()=>JSON.stringify(['600000']),setItem:()=>{writes++;throw Error('quota');}}};
  vm.runInNewContext(code,ctx);
- const m=ctx.exports as {loadWatch:()=>string[],saveWatch:(s:string[])=>void,addCodes:(s:string[],raw:string)=>unknown};
+ const m=ctx.exports as {loadWatch:()=>string[],saveWatch:(s:string[])=>Promise<void>,addCodes:(s:string[],raw:string)=>unknown};
  assert.throws(()=>m.addCodes(Array.from({length:100},(_,i)=>String(i).padStart(6,'0')),'600000'),/最多100/);
  assert.equal(writes,0);
- assert.throws(()=>m.saveWatch(['600000','600001']),/未保存/);
+ await assert.rejects(()=>m.saveWatch(['600000','600001']),/未保存/);
  assert.equal(m.loadWatch().join(','),'600000');
 });
 

@@ -44,6 +44,7 @@ export function providerFor(connection: Connection): string {
   return 'api-compatible';
 }
 export function draftFor(provider: string, saved?: Connection | null): AccessDraft {
+  if (provider === 'api') provider = saved && !isSubscription(saved.provider) ? providerFor(saved) : 'deepseek';
   if (saved && providerFor(saved) === provider) return { provider, model: saved.model, baseURL: saved.baseURL, apiKey: isSubscription(provider) ? '' : saved.apiKey };
   const entry = API_PROVIDERS.find(p => p.id === provider);
   return { provider, model: entry?.models[0]?.id ?? (['claude', 'codebuddy'].includes(provider) ? 'default' : ''), baseURL: entry?.baseURL ?? '', apiKey: '' };

@@ -9,6 +9,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { SaveNoteButton } from "@/components/ui/SaveNoteButton";
 import { hasLlm, chatStream } from "@/lib/llm";
+import { accountKey } from "@/lib/account";
 import { readMode } from "@/lib/workspace/state";
 
 const TOOL_LABEL: Record<string, string> = {
@@ -33,7 +34,7 @@ type Store = Record<string, DiveRecord>; // key = `${date}|${ns}|${code}`
 
 function loadStore(): Store {
   try {
-    const v = JSON.parse(localStorage.getItem(STORE_KEY) || "{}");
+    const v = JSON.parse(localStorage.getItem(accountKey(STORE_KEY)) || "{}");
     if (!v || typeof v !== "object" || Array.isArray(v)) return {};
     return Object.fromEntries(Object.entries(v).filter(([, r]) =>
       r && typeof r === "object" && typeof (r as DiveRecord).text === "string" &&
@@ -52,7 +53,7 @@ function persistStore(store: Store, day: string) {
     if (keep.has(k.split("|")[0])) next[k] = v;
   }
   try {
-    localStorage.setItem(STORE_KEY, JSON.stringify(next));
+    localStorage.setItem(accountKey(STORE_KEY), JSON.stringify(next));
   } catch {
     throw new Error("分析已生成，但本机存储空间不足，未能存档；请先复制结果保存。");
   }

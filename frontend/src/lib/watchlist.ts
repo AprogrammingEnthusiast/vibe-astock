@@ -1,20 +1,22 @@
-// 关注股票（自选股）—— 只存本地 localStorage，不上传、不进仓库。
+import { accountKey, accountRequest, sharedWebsite } from "./account";
+// 自选随网站账号保存；单人部署仍使用本地存储。
 // 行情复用 /api/quote；复盘时把关注股行情一并喂给用户自己的 AI。
 
 const KEY = "vr-watchlist";
 
 export function loadWatch(): string[] {
   try {
-    const v = JSON.parse(localStorage.getItem(KEY) || "[]");
+    const v = JSON.parse(localStorage.getItem(accountKey(KEY)) || "[]");
     return Array.isArray(v) ? v.filter((c) => /^\d{6}$/.test(c)) : [];
   } catch {
     return [];
   }
 }
 
-export function saveWatch(codes: string[]) {
+export async function saveWatch(codes: string[]) {
   if (codes.length > 100 && codes.length >= loadWatch().length) throw new Error("自选最多100只，请先删减后再保存；已有列表未变更");
-  try { localStorage.setItem(KEY, JSON.stringify(codes)); }
+  if (sharedWebsite) await accountRequest("/api/account/watchlist", "PUT", { codes });
+  try { localStorage.setItem(accountKey(KEY), JSON.stringify(codes)); }
   catch { throw new Error("自选未保存：浏览器存储不可用或空间不足，请检查站点存储权限"); }
 }
 

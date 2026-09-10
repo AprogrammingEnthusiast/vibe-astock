@@ -10,6 +10,7 @@
 """
 
 from __future__ import annotations
+import account_context
 
 import base64
 import binascii
@@ -32,14 +33,16 @@ _INDEX = REPORTS_DIR / "index.json"
 
 def _migrate_legacy() -> None:
     """旧版研报在仓库内 .cache/ 里，重下载项目会丢；迁到用户目录（显式设了 VR_REPORTS_DIR 或新位置已有则不动）。"""
+    if account_context.ENABLED:
+        return
     try:
-        if os.environ.get("VR_REPORTS_DIR") or REPORTS_DIR.exists() or not _OLD_DEFAULT_DIR.exists():
+        if os.environ.get("VR_REPORTS_DIR") or account_context.path(REPORTS_DIR).exists() or not _OLD_DEFAULT_DIR.exists():
             return
-        tmp = REPORTS_DIR.with_name(REPORTS_DIR.name + ".migrate.tmp")
+        tmp = account_context.path(REPORTS_DIR).with_name(account_context.path(REPORTS_DIR).name + ".migrate.tmp")
         if tmp.exists():
             shutil.rmtree(tmp)  # 上次中断留下的半截目录，重来
         shutil.copytree(_OLD_DEFAULT_DIR, tmp)
-        os.replace(tmp, REPORTS_DIR)  # 同盘原子改名：复制中断不会留半套研报挡住下次重试
+        os.replace(tmp, account_context.path(REPORTS_DIR))  # 同盘原子改名：复制中断不会留半套研报挡住下次重试
     except OSError as e:
         # 迁移失败不阻塞启动，但要出声——旧数据原样保留在 _OLD_DEFAULT_DIR，可手工复制
         print(f"[vibe-research] 研报数据迁移失败（旧数据仍在 {_OLD_DEFAULT_DIR}）: {e}", file=sys.stderr)
@@ -75,14 +78,14 @@ class ReportError(ValueError):
 
 
 def _ensure_dir() -> None:
-    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    account_context.path(REPORTS_DIR).mkdir(parents=True, exist_ok=True)
 
 
 def _load_index() -> list[dict]:
-    if not _INDEX.exists():
+    if not account_context.path(_INDEX).exists():
         return []
     try:
-        data = json.loads(_INDEX.read_text("utf-8"))
+        data = json.loads(account_context.path(_INDEX).read_text("utf-8"))
         return data if isinstance(data, list) else []
     except (json.JSONDecodeError, OSError):
         return []
@@ -90,9 +93,9 @@ def _load_index() -> list[dict]:
 
 def _save_index(items: list[dict]) -> None:
     _ensure_dir()
-    tmp = _INDEX.with_suffix(".json.tmp")
+    tmp = account_context.path(_INDEX).with_suffix(".json.tmp")
     tmp.write_text(json.dumps(items, ensure_ascii=False, indent=2), "utf-8")
-    os.replace(tmp, _INDEX)  # 原子改名，避免半截写入损坏索引（进程被 kill / OOM）
+    os.replace(tmp, account_context.path(_INDEX))  # 原子改名，避免半截写入损坏索引（进程被 kill / OOM）
 
 
 def classify(filename: str) -> str:
@@ -140,7 +143,7 @@ def save_report(name: str, content_b64: str) -> dict:
 
     _ensure_dir()
     rid = uuid.uuid4().hex
-    (REPORTS_DIR / f"{rid}{ext}").write_bytes(blob)
+    (account_context.path(REPORTS_DIR) / f"{rid}{ext}").write_bytes(blob)
     meta = {
         "id": rid,
         "name": fname,
@@ -160,7 +163,7 @@ def report_path(rid: str) -> tuple[Path, str] | None:
     """按 id 取 (磁盘路径, 原始文件名)；不存在返回 None。"""
     for r in _load_index():
         if r.get("id") == rid:
-            p = REPORTS_DIR / f"{rid}{r.get('ext', '')}"
+            p = account_context.path(REPORTS_DIR) / f"{rid}{r.get('ext', '')}"
             return (p, r.get("name", rid)) if p.exists() else None
     return None
 
@@ -172,7 +175,7 @@ def delete_report(rid: str) -> bool:
         hit = next((r for r in items if r.get("id") == rid), None)
         if hit is None:
             return False
-        fp = REPORTS_DIR / f"{rid}{hit.get('ext', '')}"
+        fp = account_context.path(REPORTS_DIR) / f"{rid}{hit.get('ext', '')}"
         try:
             fp.unlink(missing_ok=True)
         except OSError:

@@ -1,3 +1,4 @@
+import { sharedWebsite, accountKey } from "@/lib/account";
 import { randomId } from "@/lib/random-id";
 import { useSearchParams } from 'react-router-dom';
 import { AgentRequestError, agentRequest, loadAgentConnection } from "@/lib/agent-api";
@@ -27,7 +28,7 @@ const pendingKey = "astock-pending-daily";
 type PendingDaily = { date: string; force: boolean; request_id: string; source: string };
 function readPendingDaily(): PendingDaily | null {
   try {
-    const p = JSON.parse(sessionStorage.getItem(pendingKey) || "null");
+    const p = JSON.parse(sessionStorage.getItem(accountKey(pendingKey)) || "null");
     return p && /^\d{4}-\d{2}-\d{2}$/.test(p.date) && /^[0-9a-f]{32}$/.test(p.request_id)
       && typeof p.force === "boolean" && typeof p.source === "string" ? p : null;
   } catch { return null; }
@@ -177,6 +178,14 @@ export function AgentReview() {
   const [jobId, setJobId] = useState("");
   const [jobDate, setJobDate] = useState("");
   const [date, setDate] = useState<string>(() => hasDateQuery ? reportDate : localDate());
+  const [versions, setVersions] = useState<{ id: string; author: string; published_at: number }[]>([]);
+  useEffect(() => {
+    if (!sharedWebsite || !date) return;
+    let live = true;
+    agentFetch<{ versions: typeof versions }>(`/api/review/versions?date=${date}`)
+      .then(r => { if (live) setVersions(r.versions); }).catch(() => { if (live) setVersions([]); });
+    return () => { live = false; };
+  }, [date, data?.publication?.id]);
   const [dates, setDates] = useState<string[]>([]);   // 跑过复盘的交易日（历史入口）
   const [missing, setMissing] = useState<string>("");  // 选了某天但那天没跑过
   const [loadingReport, setLoadingReport] = useState(false);
@@ -190,7 +199,7 @@ export function AgentReview() {
   const polling = useRef(false);
   const [pendingIntent, setPendingIntent] = useState<PendingDaily | null>(readPendingDaily);
   const pendingDaily = useRef<PendingDaily | null>(pendingIntent);
-  function clearPendingDaily() { pendingDaily.current = null; setPendingIntent(null); try { sessionStorage.removeItem(pendingKey); } catch { setNotice("任务状态已更新，但浏览器未清除恢复记录；刷新后请先核对进度。"); } }
+  function clearPendingDaily() { pendingDaily.current = null; setPendingIntent(null); try { sessionStorage.removeItem(accountKey(pendingKey)); } catch { setNotice("任务状态已更新，但浏览器未清除恢复记录；刷新后请先核对进度。"); } }
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const alive = useRef(true);
   const reqId = useRef(0);
@@ -208,11 +217,11 @@ export function AgentReview() {
   }, []);
 
   /** 读复盘：不传 d 读最近一份；传 d 读那天的历史存档。 */
-  async function loadLatest(d?: string) {
+  async function loadLatest(d?: string, version?: string) {
     const my = ++reqId.current;
     setLoadingReport(true); setData(null); setMissing(""); setErr("");
     try {
-      const r = await agentFetch<ReviewData>(`/api/review/latest${d ? `?date=${d}` : ""}`);
+      const r = await agentFetch<ReviewData>(`/api/review/latest?${new URLSearchParams({ ...(d ? { date: d } : {}), ...(version ? { version } : {}) })}`);
       if (!alive.current || my !== reqId.current) return;   // 已卸载 / 有更新的请求 → 丢弃
       if (r && (r.target_date || r.trade_date)) {
         if (d && (r.target_date || r.trade_date) !== d) throw new Error("report date mismatch");
@@ -322,7 +331,7 @@ export function AgentReview() {
     const source = JSON.stringify({ provider: llm.provider, model: llm.model, baseURL: llm.baseURL });
     const intent = pendingDaily.current || { date, force, source, request_id: randomId().replace(/-/g, "") };
     if (intent.source !== source) { setErr("上一次启动尚未确认，请先刷新任务状态；恢复请求需使用当时的 AI 来源。"); return; }
-    try { sessionStorage.setItem(pendingKey, JSON.stringify(intent)); }
+    try { sessionStorage.setItem(accountKey(pendingKey), JSON.stringify(intent)); }
     catch { setErr("浏览器无法保存任务恢复记录，请检查存储权限后重试；尚未启动复盘。"); return; }
     pendingDaily.current = intent;
     setPendingIntent(intent);
@@ -383,6 +392,8 @@ export function AgentReview() {
         <button disabled={capturing || running} className="mt-3 rounded border border-border px-3 py-2 text-sm disabled:opacity-50" onClick={async () => { setCapturing(true); try { const r = await agentPost<{ok:boolean;results:Record<string,{ok:boolean;reason?:string}>}>(`/api/review/capture?date=${date}`, {}); setNotice(Object.entries(r.results).map(([k,v]) => `${k}：${v.ok ? '已处理' : '未完成'}${v.reason ? '（'+v.reason+'）' : ''}`).join('；')); await loadLatest(date); } catch(e) { setNotice(e instanceof Error ? e.message : '归档失败'); } finally { setCapturing(false); } }}> {capturing ? '正在补归档与回评…' : '补归档与回评（不重新调用 AI）'} </button>
       </details>}
       {caliberWarnings.map(w => <p key={w} role="status" className="rounded-xl border border-warning/40 bg-warning/10 p-4 text-sm text-warning">{w}</p>)}
+      {versions.length > 1 && <label className="block text-xs">查看共享版本 <select aria-label="共享复盘版本" disabled={loadingReport} className="max-w-full rounded border border-border bg-card p-2" value={data?.publication?.id ?? ""} onChange={e => void loadLatest(date, e.target.value)}>{versions.map(v => <option key={v.id} value={v.id}>{v.author} · {new Date(v.published_at * 1000).toLocaleString("zh-CN")}</option>)}</select></label>}
+      {data?.publication && <p className="text-xs text-muted-foreground">共享复盘 · {data.publication.author} · 阅读不调用 AI</p>}
       {/* Header */}
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
@@ -609,7 +620,8 @@ export function AgentReview() {
       {data && (
         <ReviewAgentChat
           // 换交易日即重建组件，避免旧对话串到新复盘
-          key={data.target_date || data.trade_date}
+          key={data.publication?.id || data.target_date || data.trade_date}
+          reviewVersion={data.publication?.id}
           anchor={data.target_date || data.trade_date || ""}
         />
       )}

@@ -1,5 +1,7 @@
+import { accountKey } from "@/lib/account";
 let monitorWarning: string | undefined;
 import { apiUrl } from "./base";
+import { sharedWebsite } from "./account";
 import { randomId } from "./random-id";
 let monitorId: string | undefined;
 let registeredWatch = "";
@@ -18,7 +20,7 @@ const ACCESS_KEY = "vr-access-key";
 
 export function loadAccessKey(): string {
   try {
-    return localStorage.getItem(ACCESS_KEY) || "";
+    return localStorage.getItem(accountKey(ACCESS_KEY)) || "";
   } catch {
     return "";
   }
@@ -26,16 +28,36 @@ export function loadAccessKey(): string {
 
 export function saveAccessKey(key: string) {
   try {
-    if (key) localStorage.setItem(ACCESS_KEY, key);
-    else localStorage.removeItem(ACCESS_KEY);
+    if (key) localStorage.setItem(accountKey(ACCESS_KEY), key);
+    else localStorage.removeItem(accountKey(ACCESS_KEY));
   } catch {
     throw new Error("未保存：浏览器禁止存储或空间不足，请检查权限后重试");
   }
 }
 
 export function authHeaders(): Record<string, string> {
+  if (sharedWebsite) return {};
   const k = loadAccessKey();
   return k ? { Authorization: `Bearer ${k}` } : {};
+}
+
+export interface MacroProbItem {
+  topic: string;
+  source: string;
+  title: string;
+  leg: string;
+  prob: number;
+  settle: string;
+  volume: number | null;
+  price_type: string;
+  as_of: string;
+}
+export interface MacroProbability {
+  items: MacroProbItem[];
+  updated: string;
+  partial: boolean;
+  how_to_read: string[];
+  warnings: string[];
 }
 
 export interface MyReport {
@@ -371,6 +393,9 @@ export const api = {
   turnoverTop: () => get<TurnoverTop>("/market/turnover-top"),
   globalIndices: () => get<GlobalIndex[]>("/global/indices"),
   globalStock: (symbol: string) => get<GlobalStock>(`/global/stock?symbol=${encodeURIComponent(symbol)}`),
+  macroProbability: (refresh = false) => refresh
+    ? request<MacroProbability>("/radar/events/refresh", "POST")
+    : get<MacroProbability>("/radar/events"),
   radar: () => get<RadarData>("/radar"),
   radarRefresh: () => request<RadarData>("/radar/refresh", "POST"),
   portfolio: () => get<PortfolioData>("/portfolio"),

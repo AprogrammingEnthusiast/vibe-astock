@@ -1269,12 +1269,11 @@ class TestAuthorAttribution:
                     hits.append(f"{p}: {line.strip()}")
         assert not hits, f"前端出现了个人网站：{hits}"
 
-    def test_footer_matches_accepted_research_brand(self):
+    def test_footer_keeps_account_actions(self):
         from pathlib import Path
         src = Path("frontend/src/components/layout/Layout.tsx").read_text()
-        assert 'href="https://phoenixtree.ai/"' in src
-        assert 'href="https://github.com/simonlin1212/vibe-astock"' in src
-        assert 'rel="noopener noreferrer"' in src
+        assert 'logoutWebsite' in src
+        assert 'github.com' not in src and 'x.com/' not in src
 
     def test_phoenix_brand_uses_shared_svg(self):
         from pathlib import Path
@@ -1666,7 +1665,7 @@ class TestBlockedCliRemovedFromRuntime:
         src=Path("frontend/src/lib/agent-api.ts").read_text()
         assert 'includes(value.provider)' in src
         assert "cli-qwen" not in src and "cli-deepseek" not in src
-        assert 'localStorage.getItem(key)' in src
+        assert 'localStorage.getItem(accountKey(key))' in src
 
     def test_settings_explains_why_the_old_choice_vanished(self):
         """A3：旧选择器已退役，同一保护意图验证统一入口。"""
@@ -1784,7 +1783,7 @@ class TestCliAvailabilityEndpoint:
         """"被禁"和"没装"必须分开报 —— 一个别想了，一个装一下就行。"""
         d = self._payload()
         for c in d["clis"]:
-            assert set(c) == {"kind", "allowed", "installed", "reason"}
+            assert {"kind", "allowed", "installed", "reason"} <= set(c)
             assert isinstance(c["allowed"], bool) and isinstance(c["installed"], bool)
         claude = next(c for c in d["clis"] if c["kind"] == "claude")
         assert claude["allowed"] is True and claude["reason"] is None
@@ -3410,7 +3409,7 @@ class TestAutoRefreshIsSafe:
         """别替用户决定要不要一直打请求。"""
         src = self._src()
         i = src.index("const [autoRefresh")
-        assert 'localStorage.getItem(AUTO_KEY) === "1"' in src[i:i + 200], \
+        assert 'localStorage.getItem(accountKey(AUTO_KEY)) === "1"' in src[i:i + 200], \
             "默认关（只有本地存过 1 才是开）"
 
 
@@ -3489,17 +3488,18 @@ class TestReviewOnlyRunsOnSettledSessions:
         monkeypatch.setattr(server, "_origin_ok", lambda r: True)
         monkeypatch.setattr(tc, "latest_session", lambda: "2026-07-29")
         monkeypatch.setattr(tc, "is_settled", lambda d: True)
-        monkeypatch.setattr(review_store, "load", lambda d: {"stub": True})
-        monkeypatch.setattr(review_store, "usable", lambda p: True)
+        from duanxian.roles import ROLES
+        monkeypatch.setattr(review_store, "load", lambda d: {"focus": {"ok": True}, "emotion_metrics": {"ok": True},
+            "market_facts": {"ok": True}, "analysts": [{"key": r.key, "html": "report"} for r in ROLES]})
         monkeypatch.setattr(server.threading, "Thread",
                             lambda **kw: pytest.fail("已复盘过的日子不该重跑"))
 
         r = server.api_run(self._req(), date="2026-07-29")   # type: ignore[arg-type]
         assert r["already_done"] is True and r["running"] is False
-        assert "已复盘" in r["message"]
+        assert "已完成复盘" in r["message"]
 
-    def test_force_flag_allows_a_rerun(self, monkeypatch):
-        """改了口径 / 修了 bug 时要能重跑，但得显式带 force。"""
+    def test_partial_legacy_review_allows_a_rerun(self, monkeypatch):
+        """未完成的旧复盘可以补做，新版强制重跑由 Agent 入口负责。"""
         import server
         from duanxian import review_store, trade_calendar as tc
 
@@ -3513,7 +3513,6 @@ class TestReviewOnlyRunsOnSettledSessions:
                             lambda target, args, daemon: type("T", (), {"start": lambda s: started.append(args[0])})())
 
         req = self._req()
-        req.query_params = {"force": "1"}
         r = server.api_run(req, date="2026-07-29")   # type: ignore[arg-type]
         assert r.get("running") is True and started == ["2026-07-29"]
 

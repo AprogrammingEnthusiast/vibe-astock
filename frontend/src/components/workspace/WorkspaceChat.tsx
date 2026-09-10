@@ -1,3 +1,4 @@
+import { accountKey } from "@/lib/account";
 import { randomId } from "@/lib/random-id";
 import { useEffect, useRef, useState } from 'react';
 import { Sparkles } from 'lucide-react';
@@ -14,7 +15,7 @@ type Summary = {id:string;title:string;anchor:string};
 type Conversation = Summary & {source:{provider:string;model:string;baseURL?:string};context:{mode?:string;page?:string};turns:Turn[]};
 type Pending = {id:string;question:string;conversation_id:string|null;anchor:string;mode:string;source:string};
 function today() { const d=new Date();return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; }
-function readPending(key:string):Pending|null { try {const v=JSON.parse(sessionStorage.getItem(key)||'null');return v&&/^[a-f0-9]{32}$/.test(v.id)&&typeof v.question==='string'?v:null;}catch{return null;} }
+function readPending(key:string):Pending|null { try {const v=JSON.parse(sessionStorage.getItem(accountKey(key))||'null');return v&&/^[a-f0-9]{32}$/.test(v.id)&&typeof v.question==='string'?v:null;}catch{return null;} }
 function answerText(turn:Turn) {return turn.result?.text || (turn.result ? [...turn.result.findings.map(f=>f.text), ...(turn.result.gaps.length?['资料缺口：',...turn.result.gaps]:[])].join('\n\n') : turn.error || (turn.status==='cancelled'?'任务已取消':''));}
 /** Existing turns remain bound to their source and mode; retries reuse one request id. */
 export function WorkspaceChat({ page = '首页' }: { page?: string }) {
@@ -51,7 +52,7 @@ export function WorkspaceChat({ page = '首页' }: { page?: string }) {
  // Restore only the chosen conversation. Reading never restarts an interrupted model request.
  useEffect(()=>{
   const abort=new AbortController();setLoading(true);let id:string|null=null;
-  try{id=localStorage.getItem(`astock-workspace-last:${page}`);}catch{setError('无法读取本地会话选择。');}
+  try{id=localStorage.getItem(accountKey(`astock-workspace-last:${page}`));}catch{setError('无法读取本地会话选择。');}
   if(id&&/^[a-f0-9]{32}$/.test(id)) void agentRequest<Conversation>(`/conversations/${id}`,undefined,abort.signal)
    .then(v=>{if(!abort.signal.aborted&&v.context.page===page){setConversation(v);setAnchor(v.anchor);}})
    .catch(()=>{if(!abort.signal.aborted)setError('上次会话暂时无法恢复，请从历史会话重试。');})
@@ -68,10 +69,10 @@ export function WorkspaceChat({ page = '首页' }: { page?: string }) {
   }catch{if(!abort.signal.aborted){setError('暂时无法读取进度，正在重新连接；不会重复启动任务。');timer=setTimeout(poll,2000);}}};
   void poll();return()=>{abort.abort();clearTimeout(timer);};
  },[running?.id]);
- function remember(c:Conversation) {setConversation(c);setAnchor(c.anchor);try{localStorage.setItem(`astock-workspace-last:${page}`,c.id);}catch{setError('回答已在服务端保存，但浏览器无法保存会话选择。');}}
+ function remember(c:Conversation) {setConversation(c);setAnchor(c.anchor);try{localStorage.setItem(accountKey(`astock-workspace-last:${page}`),c.id);}catch{setError('回答已在服务端保存，但浏览器无法保存会话选择。');}}
  async function choose(id:string){
   if(sending||running)return;const current=++version.current;setError(null);
-  if(!id){setConversation(null);dateTouched.current=false;setAnchor(mode==='agent'&&reportDates.length?reportDates[0]:today());try{localStorage.removeItem(`astock-workspace-last:${page}`);}catch{}return;}
+  if(!id){setConversation(null);dateTouched.current=false;setAnchor(mode==='agent'&&reportDates.length?reportDates[0]:today());try{localStorage.removeItem(accountKey(`astock-workspace-last:${page}`));}catch{}return;}
   setLoading(true);try{const c=await agentRequest<Conversation>(`/conversations/${id}`);if(alive.current&&current===version.current)remember(c);}
   catch{if(alive.current)setError('无法读取所选会话。');}finally{if(alive.current&&current===version.current)setLoading(false);}
  }
@@ -82,7 +83,7 @@ export function WorkspaceChat({ page = '首页' }: { page?: string }) {
   try{const result=await agentRequest<{ok:boolean}>(`/conversations/${conversation.id}/delete`,{});
    if(!result.ok)throw new Error('删除失败');
    setList(old=>old.filter(v=>v.id!==conversation.id));setConversation(null);
-   try{localStorage.removeItem(`astock-workspace-last:${page}`);}catch{}
+   try{localStorage.removeItem(accountKey(`astock-workspace-last:${page}`));}catch{}
   }catch(e){setError(e instanceof Error?e.message:'删除失败');}finally{setLoading(false);}
  }
  async function send(text:string){
@@ -96,7 +97,7 @@ export function WorkspaceChat({ page = '首页' }: { page?: string }) {
    retry.current={id:randomId().replace(/-/g,''),question,conversation_id:cid,anchor,mode,source};
   const pending=retry.current;
   // Persist identity BEFORE dispatch. Storage failure must not create an unrecoverable paid request.
-  try{sessionStorage.setItem(cacheKey,JSON.stringify(pending));}catch{setError('无法保存请求编号，请允许本地存储后重试。');pick(text);return;}
+  try{sessionStorage.setItem(accountKey(cacheKey),JSON.stringify(pending));}catch{setError('无法保存请求编号，请允许本地存储后重试。');pick(text);return;}
   busy.current=true;setSending(true);setRecovery(pending);setError(null);
   try{
    const turn=await agentRequest<Turn>('/turns',{anchor,question,request_id:pending.id,conversation_id:cid,
@@ -104,7 +105,7 @@ export function WorkspaceChat({ page = '首页' }: { page?: string }) {
    // Keep recovery id until the conversation was also retrieved; a lost response retries the same request.
    const c=await agentRequest<Conversation>(`/conversations/${turn.conversation_id}`);
    if(alive.current){remember(c);setRefresh(n=>n+1);setRecovery(null);}
-   retry.current=null;sessionStorage.removeItem(cacheKey);
+   retry.current=null;sessionStorage.removeItem(accountKey(cacheKey));
   }catch(e){if(alive.current){setError(e instanceof Error?e.message:'发送未确认，可恢复同一请求。');setDraft(current=>current||text);}}
   finally{busy.current=false;if(alive.current)setSending(false);}
  }

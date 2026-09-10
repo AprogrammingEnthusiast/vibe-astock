@@ -1,5 +1,6 @@
 """Local-only API and a bounded background worker for public review questions."""
 from __future__ import annotations
+import account_context
 
 import hmac
 import os
@@ -70,6 +71,7 @@ class DailyCancelInput(BaseModel):
 
 class ResearchScope(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    review_version: str = Field(default="", pattern=r"^(?:[0-9a-f]{64})?$")
     allow_network: bool = False
     symbol: str = Field(default="", pattern=r"^(?:\d{6})?$")
     mode: Literal["direct", "agent"] = "agent"
@@ -167,6 +169,8 @@ class Manager:
             if self.active and self.store.turn(self.active[0])["status"] == "cancelled":
                 raise EvidenceError("正在停止上一任务，请稍后再试")
             context = body.scope.model_dump()
+            if not context["review_version"]:
+                context.pop("review_version")
             if context["mode"] == "direct" and (context["allow_network"] or context["symbol"]):
                 raise EvidenceError("普通对话不能请求联网或标的工具")
             # Preserve identity of existing Agent conversations.
@@ -181,7 +185,7 @@ class Manager:
                 if context.get("mode") == "direct":
                     bundle = {"anchor":body.anchor, "dates":[], "evidence":[], "gaps":[], "targets":[], "scope":"普通对话，无本地资料"}
                 else:
-                    bundle = build_bundle(self.reviews, body.anchor)
+                    bundle = build_bundle(self.reviews, body.anchor, version=context["review_version"]) if context.get("review_version") else build_bundle(self.reviews, body.anchor)
                 bundle["context"] = context
                 if context["allow_network"]:
                     bundle["scope"] += " 用户已启用受控公开日线补充，仅限复盘日及之前。"
@@ -191,7 +195,7 @@ class Manager:
                                              bundle_factory, body.conversation_id, context)
             if created:
                 cancel = threading.Event()
-                thread = threading.Thread(target=self._work, args=(turn, key, cancel), daemon=True)
+                thread = account_context.thread(target=self._work, args=(turn, key, cancel), daemon=True)
                 self.active = (turn["id"], cancel, thread)
                 thread.start()
         return turn
@@ -376,6 +380,19 @@ def create_router(manager_source: Manager | Callable[[], Manager], access_key: s
     def login(manager: Manager = Depends(get_manager)):
         return checked(start_access, manager, "login")
 
+    @router.post("/access/logout")
+    def logout(manager: Manager = Depends(get_manager)):
+        with manager.lock:
+            if manager.active or manager.daily.busy() or manager.deepdive.busy() or manager.page_chats.busy() or manager.access.busy():
+                raise HTTPException(409, "请先完成或取消正在运行的任务")
+            (manager.runtime.home / "auth.json").unlink(missing_ok=True)
+            import sharing_worker
+            if sharing_worker.ENABLED:
+                (account_context.home() / ".codex" / "auth.json").unlink(missing_ok=True)
+                sharing_worker.write_profile(None)
+                sharing_worker.write_profile(None, sharing_worker.PROFILE.with_name("agent-connection.json"))
+        return {"ok": True}
+
     @router.post("/access/probe")
     def probe(body: ProbeInput, manager: Manager = Depends(get_manager)):
         config = body.llm.model_dump(exclude={"apiKey"})
@@ -388,12 +405,12 @@ def create_router(manager_source: Manager | Callable[[], Manager], access_key: s
         return manager.access.stop()
 
     @router.get("/conversations")
-    def conversations(anchor: str = "", mode: Literal["agent", "direct"] = "agent", page: str = "", manager: Manager = Depends(get_manager)):
-        return checked(manager.store.list_conversations, anchor, mode, page)
+    def conversations(anchor: str = "", mode: Literal["agent", "direct"] = "agent", page: str = "", review_version: str = "", manager: Manager = Depends(get_manager)):
+        return checked(manager.store.list_conversations, anchor, mode, page, review_version)
 
     @router.get("/catalog")
-    def catalog(anchor: str, manager: Manager = Depends(get_manager)):
-        bundle = checked(build_bundle, manager.reviews, anchor)
+    def catalog(anchor: str, review_version: str = "", manager: Manager = Depends(get_manager)):
+        bundle = checked(lambda: build_bundle(manager.reviews, anchor, version=review_version))
         return {"targets": bundle["targets"], "revision": bundle["revision"]}
 
     @router.get("/observations")

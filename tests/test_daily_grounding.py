@@ -257,6 +257,9 @@ def test_real_worker_cross_dates_failure_restart_and_preserved_history(tmp_path,
     from duanxian import data, review_store, trade_calendar
     from review_agent.api import Manager, DailyInput
     from review_agent.store import Store
+    from review_agent import post_review
+    # Capture runs in a child process, outside the patched market sources and network guard.
+    monkeypatch.setattr(post_review, "capture_bounded", lambda date, **kwargs: {"capture": {"ok": True}})
     monkeypatch.setattr(review_store, "DIR", str(tmp_path / "reviews"))
     monkeypatch.setattr(trade_calendar, "is_settled", lambda date: True)
     for name in inputs():

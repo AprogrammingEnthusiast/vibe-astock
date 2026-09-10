@@ -4,6 +4,7 @@ Host code freezes dated inputs. Models have no tools. Grounded prose is
 qualitative; source quotes and deterministic numerical comparisons are host-owned.
 """
 from __future__ import annotations
+import account_context
 
 import json
 import re
@@ -230,7 +231,7 @@ class Daily:
                         "source": source, "running": True, "status": "running", "stage": "核对输入资料",
                         "started": time.time(), "elapsed": 0, "error": None}
         self._update()
-        self.worker = threading.Thread(target=self._work, args=(date, source, key), daemon=True)
+        self.worker = account_context.thread(target=self._work, args=(date, source, key), daemon=True)
         self.worker.start()
         return self.snapshot()
 

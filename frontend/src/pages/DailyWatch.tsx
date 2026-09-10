@@ -123,17 +123,17 @@ export function DailyWatch({ view = "live" }: { view?: "live" | "yesterday" }) {
     (a.change_pct == null || Math.abs(a.change_pct) >= threshold) &&
     (alertScope === "all" || watch.includes(a.code) || (snap?.holdings || []).some(p => p.code === a.code)));
   const [watchError, setWatchError] = useState<string | null>(null);
-  const toggleWatch = (code: string) => {
+  const toggleWatch = async (code: string) => {
     try {
       const next = watch.includes(code) ? watch.filter(c => c !== code) : [...watch, code];
-      saveWatch(next); setWatch(next); setWatchError(null);
+      await saveWatch(next); setWatch(next); setWatchError(null);
     } catch(e) { setWatchError(e instanceof Error ? e.message : "自选保存失败"); }
   };
-  const addWatchInput = () => {
+  const addWatchInput = async () => {
     if (!watchInput.trim()) return;
     try {
       const { next } = addCodes(watch, watchInput);
-      saveWatch(next); setWatch(next); setWatchInput(""); setWatchError(null);
+      await saveWatch(next); setWatch(next); setWatchInput(""); setWatchError(null);
     } catch(e) { setWatchError(e instanceof Error ? e.message : "自选保存失败"); }
   };
 

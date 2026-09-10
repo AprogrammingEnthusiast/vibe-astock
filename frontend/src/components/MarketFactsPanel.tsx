@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { Fragment, useState } from "react";
 import {
   AlertTriangle, ArrowLeftRight, ChevronDown, ChevronRight, Gauge, Layers3,
   ListTree, Lock, Network, Rows3,
@@ -65,6 +65,8 @@ export function Section({
 /** 昨日强势股反馈矩阵：按昨日板位分组，看今天各落到什么结果 */
 export function Matrix({ fm }: { fm?: FeedbackMatrix }) {
   const matrix = safeRecord<FeedbackCell>(fm?.matrix);
+  const details = safeArray<FeedbackDetail>(fm?.details);
+  const [openTier, setOpenTier] = useState<string | null>(null);
   // 板位写具体高度（首板/2板/3板/…/9板），档位动态从 matrix 键生成：
   // 首板固定最前、「昨日炸板」固定最后，中间按数字升序
   const tierOrder = (t: string) =>
@@ -95,49 +97,63 @@ export function Matrix({ fm }: { fm?: FeedbackMatrix }) {
             <tbody>
               {tiers.map((t) => {
                 const c = matrix[t];
+                const tierDetails = details.filter((d) => d.prev_tier === t);
+                const open = openTier === t;
                 return (
-                  <tr key={t} className="border-b border-border/50 last:border-0">
-                    <td className="py-1.5 font-semibold">{t}<span className="ml-1 text-muted-foreground">({c.合计})</span></td>
-                    <td className={cn("px-1.5 py-1.5 text-right", countColor("up"))}>{c.晋级涨停}</td>
-                    <td className="px-1.5 py-1.5 text-right">{c.收红}</td>
-                    <td className="px-1.5 py-1.5 text-right text-muted-foreground">{c.小跌}</td>
-                    <td className={cn("px-1.5 py-1.5 text-right", countColor("down"))}>{c["跌超5%"]}</td>
-                    <td className={cn("px-1.5 py-1.5 text-right font-bold", countColor("down"))}>{c.跌停}</td>
-                    <td className="px-1.5 py-1.5 text-right font-bold">{rate(c.晋级率)}</td>
-                  </tr>
+                  <Fragment key={t}>
+                    <tr className="border-b border-border/50">
+                      <td className="font-semibold">
+                        <button
+                          type="button"
+                          aria-expanded={open}
+                          onClick={() => setOpenTier(open ? null : t)}
+                          className="flex min-h-9 w-full cursor-pointer items-center gap-1 rounded px-1.5 text-left hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+                        >
+                          {open
+                            ? <ChevronDown aria-hidden="true" className="h-3.5 w-3.5 text-primary" />
+                            : <ChevronRight aria-hidden="true" className="h-3.5 w-3.5 text-muted-foreground" />}
+                          {t}<span className="text-muted-foreground">({c.合计})</span>
+                        </button>
+                      </td>
+                      <td className={cn("px-1.5 py-1.5 text-right", countColor("up"))}>{c.晋级涨停}</td>
+                      <td className="px-1.5 py-1.5 text-right">{c.收红}</td>
+                      <td className="px-1.5 py-1.5 text-right text-muted-foreground">{c.小跌}</td>
+                      <td className={cn("px-1.5 py-1.5 text-right", countColor("down"))}>{c["跌超5%"]}</td>
+                      <td className={cn("px-1.5 py-1.5 text-right font-bold", countColor("down"))}>{c.跌停}</td>
+                      <td className="px-1.5 py-1.5 text-right font-bold">{rate(c.晋级率)}</td>
+                    </tr>
+                    {open && (
+                      <tr className="border-b border-border/50 bg-primary/[0.03]">
+                        <td colSpan={7} className="border-l-2 border-primary/40 px-4 py-2">
+                          <div className="max-h-64 overflow-y-auto">
+                            <table className="w-full text-[11px] tabular-nums">
+                              <thead className="sr-only">
+                                <tr><th>股票</th><th>代码</th><th>今日涨跌</th><th>今日表现</th><th>行业</th></tr>
+                              </thead>
+                              <tbody>
+                                {tierDetails.map((d) => (
+                                  <tr key={d.code} className="border-b border-border/30 last:border-0">
+                                    <td className="py-1 pr-2 font-semibold">{d.name}</td>
+                                    <td className="pr-2 text-muted-foreground">{d.code}</td>
+                                    <td className={cn("pr-2 font-bold", pctColor(d.ret))}>
+                                      {d.ret > 0 ? "+" : ""}{d.ret}%
+                                    </td>
+                                    <td className="pr-2">{d.result}</td>
+                                    <td className="truncate text-muted-foreground">{d.sector}</td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        </td>
+                      </tr>
+                    )}
+                  </Fragment>
                 );
               })}
             </tbody>
           </table>
         </div>
-      )}
-      {/* 明细：后端已产出每只票的结果，之前完全没展示（半截功能）。
-          默认折叠 —— 复盘先看矩阵，要追到具体哪只票再展开。按今日结果从差到好排。*/}
-      {safeArray<FeedbackDetail>(fm?.details).length > 0 && (
-        <details className="mt-3">
-          <summary className="cursor-pointer text-[11px] text-muted-foreground hover:text-foreground">
-            展开明细（{safeArray<FeedbackDetail>(fm?.details).length} 只，按今日表现从差到好）
-          </summary>
-          <div className="mt-2 max-h-64 overflow-y-auto">
-            <table className="w-full text-[11px] tabular-nums">
-              <tbody>
-                {safeArray<FeedbackDetail>(fm?.details).map((d) => (
-                  <tr key={d.code} className="border-b border-border/30 last:border-0">
-                    <td className="py-1 pr-2 font-semibold">{d.name}</td>
-                    <td className="pr-2 text-muted-foreground">{d.code}</td>
-                    <td className="pr-2 text-muted-foreground">{d.prev_tier}</td>
-                    <td className={cn("pr-2 font-bold",
-                      pctColor(d.ret))}>
-                      {d.ret > 0 ? "+" : ""}{d.ret}%
-                    </td>
-                    <td className="pr-2">{d.result}</td>
-                    <td className="truncate text-muted-foreground">{d.sector}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </details>
       )}
     </Section>
   );

@@ -1,9 +1,10 @@
+import { accountKey } from "@/lib/account";
 import { sourceLabel } from '@/lib/ai-access';
 import { createContext, useContext, useEffect, useState, type ReactNode } from 'react';
 import { agentRequest, loadAgentConnection } from '@/lib/agent-api';
 import { connectionLabel, subscriptionStatus, type ConnectionStatus } from './status';
 const modeKey = 'astock-workspace-agent-v1';
-export function readMode(): boolean { try { return localStorage.getItem(modeKey) === 'on'; } catch { return false; } }
+export function readMode(): boolean { try { return localStorage.getItem(accountKey(modeKey)) === 'on'; } catch { return false; } }
 type State = { status: ConnectionStatus; name: string; label: string; previouslyTested: boolean; enabled: boolean; error: string; refresh: () => void; toggle: () => void; connect: () => void; closeConnect: () => void; setupOpen: boolean };
 const Context = createContext<State | null>(null);
 export function WorkspaceProvider({ children }: { children: ReactNode }) {
@@ -26,7 +27,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     setPreviouslyTested(!!saved?.verifiedAt);
     setEnabled(readMode()); setError('');
     if (!saved) {
-      try { setStatus(localStorage.getItem('astock-agent-connection') ? 'error' : 'missing'); }
+      try { setStatus(localStorage.getItem(accountKey('astock-agent-connection')) ? 'error' : 'missing'); }
       catch { setStatus('error'); }
       return;
     }
@@ -47,7 +48,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     return () => controller.abort();
   }, [revision]);
   const toggle = () => {
-    try { localStorage.setItem(modeKey, enabled ? 'off' : 'on'); setEnabled(!enabled); setError(''); }
+    try { localStorage.setItem(accountKey(modeKey), enabled ? 'off' : 'on'); setEnabled(!enabled); setError(''); }
     catch { setError('无法保存开关，请允许本地存储后重试。'); }
   };
   return <Context.Provider value={{ status, name, previouslyTested, label: connectionLabel(status, name, previouslyTested), enabled, error,

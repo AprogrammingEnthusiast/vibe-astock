@@ -1,3 +1,4 @@
+import { accountKey, accountRequest, sharedWebsite } from "@/lib/account";
 import { authHeaders } from "@/lib/api";
 import { apiUrl } from "@/lib/base";
 
@@ -6,13 +7,13 @@ const key = "astock-agent-connection";
 // Verification metadata is opt-in for the status display, never a model request field.
 export function loadAgentConnection(includeVerification = false): AgentConnection | null {
   try {
-    const value = JSON.parse(localStorage.getItem(key) || "null");
+    const value = JSON.parse(localStorage.getItem(accountKey(key)) || "null");
     return value && ["openai", "mimo", "codex-private", "claude", "codebuddy", "api-compatible"].includes(value.provider)
       && typeof value.model === "string" && typeof value.baseURL === "string" && typeof value.apiKey === "string" ? {provider:value.provider,model:value.model,baseURL:value.baseURL,apiKey:value.apiKey,
         ...(includeVerification && typeof value.verifiedAt === 'number' && Number.isFinite(value.verifiedAt) && value.verifiedAt > 0 && value.verifiedAt <= Date.now() ? {verifiedAt:value.verifiedAt} : {})} : null;
   } catch { return null; }
 }
-export function saveAgentConnection(value: AgentConnection) { localStorage.setItem(key, JSON.stringify(value)); window.dispatchEvent(new Event("astock-connection-changed")); }
+export async function saveAgentConnection(value: AgentConnection) { if (sharedWebsite) await accountRequest("/api/personal/agent-connection", "PUT", {llm:value}); localStorage.setItem(accountKey(key), JSON.stringify(value)); window.dispatchEvent(new Event("astock-connection-changed")); }
 export class AgentRequestError extends Error {
   constructor(message: string, public status: number) { super(message); }
 }

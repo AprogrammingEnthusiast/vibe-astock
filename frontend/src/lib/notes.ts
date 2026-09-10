@@ -1,6 +1,8 @@
 // 研究记录（沉淀）—— 把 AI 复盘 / 今日要点 / 问 AI 的结果存本地，形成个人投研记录。
 // 只存本地 localStorage，不上传、不进仓库。对应投研框架第 7 层「沉淀」。
 
+import { accountKey } from "./account";
+
 export interface Note {
   id: string;
   kind: string;   // 复盘 / 今日要点 / 问AI
@@ -14,7 +16,7 @@ const KEY = "vr-notes";
 
 export function loadNotes(): Note[] {
   try {
-    const v = JSON.parse(localStorage.getItem(KEY) || "[]");
+    const v = JSON.parse(localStorage.getItem(accountKey(KEY)) || "[]");
     if (!Array.isArray(v) || v.some(n => !n || typeof n.id !== "string" || typeof n.title !== "string" || typeof n.content !== "string" || typeof n.kind !== "string" || !Number.isFinite(n.ts))) throw new Error("研究记录格式不正确");
     return v;
   } catch {
@@ -23,7 +25,7 @@ export function loadNotes(): Note[] {
 }
 
 function persist(notes: Note[]) {
-  try { localStorage.setItem(KEY, JSON.stringify(notes)); }
+  try { localStorage.setItem(accountKey(KEY), JSON.stringify(notes)); }
   catch { throw new Error("本机存储空间不足或禁止保存，原记录未改动，请先复制本次结果"); }
 }
 
@@ -45,4 +47,8 @@ export function deleteNote(id: string): Note[] {
   const next = loadNotes().filter((n) => n.id !== id);
   persist(next);
   return next;
+}
+
+export function clearNotes() {
+  localStorage.removeItem(accountKey(KEY));
 }

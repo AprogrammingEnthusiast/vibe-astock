@@ -139,7 +139,7 @@ class Store:
             out["bundle"] = bundle
         return out
 
-    def list_conversations(self, anchor: str = "", mode: str = "agent", page: str = "") -> list[dict]:
+    def list_conversations(self, anchor: str = "", mode: str = "agent", page: str = "", review_version: str = "") -> list[dict]:
         if anchor:
             valid_date(anchor)
         if mode not in ("agent", "direct") or len(page) > 80:
@@ -150,8 +150,9 @@ class Store:
                 WHERE (?='' OR anchor=?)
                 AND coalesce(json_extract(bundle,'$.context.mode'),'agent')=?
                 AND coalesce(json_extract(bundle,'$.context.page'),'')=?
+                AND coalesce(json_extract(bundle,'$.context.review_version'),'')=?
                 ORDER BY created DESC LIMIT 20
-            """, (anchor, anchor, mode, page))]
+            """, (anchor, anchor, mode, page, review_version))]
 
     def delete_conversation(self, conversation_id: str) -> dict:
         identifier(conversation_id)

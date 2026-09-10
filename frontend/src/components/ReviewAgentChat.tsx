@@ -54,7 +54,7 @@ export function EvidenceCard({ evidence, all }: { evidence: Evidence; all: Evide
   </details>;
 }
 
-export function ReviewAgentChat({ anchor }: { anchor: string }) {
+export function ReviewAgentChat({ anchor, reviewVersion = "" }: { anchor: string; reviewVersion?: string }) {
   const [health, setHealth] = useState<Health | null>(null);
   const [conversations, setConversations] = useState<Summary[]>([]);
   const [conversation, setConversation] = useState<Conversation | null>(null);
@@ -87,8 +87,8 @@ export function ReviewAgentChat({ anchor }: { anchor: string }) {
       try {
         const [status, list, catalog] = await Promise.all([
           request<Health>("/status", abort.signal),
-          request<Summary[]>(`/conversations?anchor=${encodeURIComponent(anchor)}`, abort.signal),
-          request<{ targets: Target[] }>(`/catalog?anchor=${encodeURIComponent(anchor)}`, abort.signal).catch(() => ({ targets: [] })),
+          request<Summary[]>(`/conversations?anchor=${encodeURIComponent(anchor)}&review_version=${encodeURIComponent(reviewVersion)}`, abort.signal),
+          request<{ targets: Target[] }>(`/catalog?anchor=${encodeURIComponent(anchor)}&review_version=${encodeURIComponent(reviewVersion)}`, abort.signal).catch(() => ({ targets: [] })),
         ]);
         if (!live) return;
         setHealth(status); setConversations(list); setTargets(catalog.targets);
@@ -101,7 +101,7 @@ export function ReviewAgentChat({ anchor }: { anchor: string }) {
       } finally { if (live) setLoading(false); }
     })();
     return () => { live = false; abort.abort(); };
-  }, [anchor]);
+  }, [anchor, reviewVersion]);
 
   useEffect(() => {
     if (!running) return;
@@ -153,7 +153,7 @@ export function ReviewAgentChat({ anchor }: { anchor: string }) {
     busy.current = true; setPending(true); setError("");
     try {
       const turn = await request<Turn>("/turns", controller.current.signal, {
-        anchor, question: text, request_id: retry.current.id, conversation_id: cid, llm, scope: { allow_network: network, symbol },
+        anchor, question: text, request_id: retry.current.id, conversation_id: cid, llm, scope: { allow_network: network, symbol, review_version: reviewVersion },
       });
       const saved = await request<Conversation>(`/conversations/${turn.conversation_id}`, controller.current.signal);
       setConversation(saved); setInput(""); retry.current = null;

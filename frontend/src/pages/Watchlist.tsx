@@ -26,7 +26,7 @@ export function Watchlist({ embedded = false }: { embedded?: boolean }) {
   };
   useEffect(() => { refresh(loadWatch()); }, []);
 
-  const add = () => {
+  const add = async () => {
     try {
     const { next, added } = addCodes(codes, input);
     if (added === 0) {
@@ -34,14 +34,14 @@ export function Watchlist({ embedded = false }: { embedded?: boolean }) {
       setInput("");
       return;
     }
-    saveWatch(next); setCodes(next); setInput(""); setHint(`已添加 ${added} 只`);
+    await saveWatch(next); setCodes(next); setInput(""); setHint(`已添加 ${added} 只`);
     refresh(next);
     } catch(e) { setHint(e instanceof Error ? e.message : "自选保存失败"); }
   };
-  const remove = (c: string) => {
+  const remove = async (c: string) => {
     try {
     const next = codes.filter((x) => x !== c);
-    saveWatch(next); setCodes(next); refresh(next);
+    await saveWatch(next); setCodes(next); refresh(next);
     } catch(e) { setHint(e instanceof Error ? e.message : "自选保存失败"); }
   };
 

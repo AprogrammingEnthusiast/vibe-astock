@@ -1,3 +1,4 @@
+import { accountKey } from "@/lib/account";
 import { randomId } from "@/lib/random-id";
 import { useEffect, useRef, useState } from 'react';
 import { authHeaders } from '@/lib/api';
@@ -28,10 +29,10 @@ export function StrategyBacktest(){
   const [text,setText]=useState(''),[messages,setMessages]=useState<Message[]>([]),[job,setJob]=useState<Job|null>(null),[error,setError]=useState(''),[pending,setPending]=useState<Pending|null>(null),[reports,setReports]=useState<{job_id:string;started:number;spec:Spec}[]>([]),[busy,setBusy]=useState(false);
   const alive=useRef(true), handled=useRef('');
   const history=()=>agentRequest<typeof reports>('/backtest-reports').then(d=>{if(alive.current)setReports(d)}).catch(()=>{if(alive.current)setError('回测报告列表暂时读取失败，请刷新页面重试。')});
-  useEffect(()=>{alive.current=true;void history();try{const raw=JSON.parse(localStorage.getItem(storage)||'null');if(raw?.task_kind==='backtest'&&/^[0-9a-f]{32}$/.test(raw.request_id)&&Array.isArray(raw.messages)&&raw.source){setPending(raw);setMessages(raw.messages);setBusy(true)}}catch{setError('恢复记录读取失败，已保存报告仍可从下方打开。')}return()=>{alive.current=false}},[]);
+  useEffect(()=>{alive.current=true;void history();try{const raw=JSON.parse(localStorage.getItem(accountKey(storage))||'null');if(raw?.task_kind==='backtest'&&/^[0-9a-f]{32}$/.test(raw.request_id)&&Array.isArray(raw.messages)&&raw.source){setPending(raw);setMessages(raw.messages);setBusy(true)}}catch{setError('恢复记录读取失败，已保存报告仍可从下方打开。')}return()=>{alive.current=false}},[]);
   useEffect(()=>{
     if(!pending)return;let stopped=false,timer:ReturnType<typeof setTimeout>;
-    const poll=async()=>{try{const row=await agentRequest<Job>(`/chat-jobs/${pending.request_id}`);if(stopped)return;setJob(row);if(row.running){setBusy(true);timer=setTimeout(poll,1500);return}setBusy(false);if(handled.current!==row.job_id){handled.current=row.job_id;setMessages([...pending.messages,...(row.answer?[{role:'assistant' as const,content:row.answer.length>4000?row.answer.slice(0,3950)+"\n[旧条件说明过长，已截断，请重新整理后确认。]":row.answer}]:[])]);if(row.error)setError(row.error);localStorage.removeItem(storage);setPending(null);void history()}}catch(e){if(!stopped){setBusy(false);setError((e as Error).message+'；可重试恢复同一请求。')}}};
+    const poll=async()=>{try{const row=await agentRequest<Job>(`/chat-jobs/${pending.request_id}`);if(stopped)return;setJob(row);if(row.running){setBusy(true);timer=setTimeout(poll,1500);return}setBusy(false);if(handled.current!==row.job_id){handled.current=row.job_id;setMessages([...pending.messages,...(row.answer?[{role:'assistant' as const,content:row.answer.length>4000?row.answer.slice(0,3950)+"\n[旧条件说明过长，已截断，请重新整理后确认。]":row.answer}]:[])]);if(row.error)setError(row.error);localStorage.removeItem(accountKey(storage));setPending(null);void history()}}catch(e){if(!stopped){setBusy(false);setError((e as Error).message+'；可重试恢复同一请求。')}}};
     timer=setTimeout(poll,800);return()=>{stopped=true;clearTimeout(timer)};
   },[pending]);
   async function send(spec?:Spec,retry?:Pending){
@@ -41,7 +42,7 @@ export function StrategyBacktest(){
     const next=retry?.messages??[...messages,{role:'user' as const,content:spec?'确认以上参数，执行历史回测。':text.trim()}].slice(-12);
     if(!spec&&!retry&&!text.trim())return;
     let request:Pending;
-    try{request=retry??{request_id:randomId().replace(/-/g,''),messages:next,task_kind:'backtest',...(spec?{backtest_args:spec}:{}),source};localStorage.setItem(storage,JSON.stringify(request))}catch{setError('无法保存恢复标识，未发起任务。');return}
+    try{request=retry??{request_id:randomId().replace(/-/g,''),messages:next,task_kind:'backtest',...(spec?{backtest_args:spec}:{}),source};localStorage.setItem(accountKey(storage),JSON.stringify(request))}catch{setError('无法保存恢复标识，未发起任务。');return}
     setBusy(true);setError('');setJob(spec?{job_id:request.request_id,running:true,status:"running",backtest_spec:spec}:null);setMessages(next);setText('');
     try{const {source:_,...body}=request;await agentRequest<Job>('/chat-jobs',{...body,llm:connection});if(alive.current)setPending({...request})}catch(e){if(alive.current){setPending({...request});setBusy(false);setError((e as Error).message)}}
   }

@@ -154,7 +154,7 @@ ALL_A_FS = ("m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:7,m:1+t:3,"
 # ----------------------------------------------------------------------------
 # 通用 push2delay clist 拉取 (自动翻页)
 # ----------------------------------------------------------------------------
-def _clist(fs, fid, fields, ut=UT_FUND, pz=100, max_pages=80, retries=3):
+def _clist(fs, fid, fields, ut=UT_FUND, pz=100, max_pages=80, retries=3, *, require_complete=False):
     """
     通用 clist 抓取, 返回 list[dict].
     注意: push2delay 镜像把单页 pz 硬截到 100, 所以按"实际累计返回数"翻页,
@@ -188,6 +188,8 @@ def _clist(fs, fid, fields, ut=UT_FUND, pz=100, max_pages=80, retries=3):
         if len(rows) >= total or len(diff) == 0:
             break
         page += 1
+    if require_complete and (total is None or len(rows) != total or len({r.get("f12") for r in rows}) != len(rows)):
+        raise ValueError("板块分页结果不完整或重复")
     return rows
 
 

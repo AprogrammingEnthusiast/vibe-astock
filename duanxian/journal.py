@@ -15,6 +15,7 @@
 """
 
 from __future__ import annotations
+import account_context
 
 import datetime
 import json
@@ -66,7 +67,7 @@ _FEE_LABELS = {
 def load_fees() -> dict:
     """仅文件不存在时使用初值；已有配置异常不得悄悄改变结算费用。"""
     try:
-        with open(_FEE_PATH, encoding="utf-8") as fh:
+        with open(account_context.path(_FEE_PATH), encoding="utf-8") as fh:
             saved = json.load(fh)
     except FileNotFoundError:
         return {**DEFAULT_FEES, "is_default": True}
@@ -104,8 +105,8 @@ def save_fees(cfg: dict) -> dict:
         out[k] = f
     if len(out) != len(DEFAULT_FEES):
         raise ValueError("请填写全部费率项目，缺项不会自动使用初值")
-    os.makedirs(_DIR, exist_ok=True)
-    if not atomic_write_json(_FEE_PATH, out):
+    os.makedirs(account_context.path(_DIR), exist_ok=True)
+    if not atomic_write_json(account_context.path(_FEE_PATH), out):
         raise RuntimeError("费率写入失败")
     return {"ok": True, "fees": {**out, "is_default": False}}
 
@@ -136,15 +137,15 @@ def _load_raw() -> list[dict]:
 
     返回空表会让下一次 add 把整本账覆盖成只剩一条，历史记录直接丢失。
     """
-    if not os.path.isfile(_PATH):
+    if not os.path.isfile(account_context.path(_PATH)):
         return []
     try:
-        with open(_PATH, encoding="utf-8") as fh:
+        with open(account_context.path(_PATH), encoding="utf-8") as fh:
             d = json.load(fh)
     except Exception as exc:  # noqa: BLE001
-        raise JournalCorrupted(f"账本文件无法解析（{type(exc).__name__}），已停止写入以防覆盖：{_PATH}") from exc
+        raise JournalCorrupted(f"账本文件无法解析（{type(exc).__name__}），已停止写入以防覆盖：{account_context.path(_PATH)}") from exc
     if not isinstance(d, dict) or "trades" not in d:
-        raise JournalCorrupted(f"账本文件结构异常，已停止写入以防覆盖：{_PATH}")
+        raise JournalCorrupted(f"账本文件结构异常，已停止写入以防覆盖：{account_context.path(_PATH)}")
     got = d.get("schema")
     if got != _SCHEMA:
         # ⚠️ 能自动迁移的就迁，别让老用户卡死。**迁移前先备份** ——
@@ -152,7 +153,7 @@ def _load_raw() -> list[dict]:
         trades = _migrate(got, d.get("trades") or [])
         if trades is None:
             raise JournalCorrupted(
-                f"账本 schema={got} 无法自动迁移到 {_SCHEMA}，已停止写入：{_PATH}")
+                f"账本 schema={got} 无法自动迁移到 {_SCHEMA}，已停止写入：{account_context.path(_PATH)}")
         return trades
     return d.get("trades") or []
 
@@ -187,8 +188,8 @@ def _migrate(from_schema, trades: list[dict]) -> Optional[list[dict]]:
 
 def _backup_once(tag: str) -> None:
     """迁移前把原件另存一份。同 tag 只备份一次，不覆盖。"""
-    src = _PATH
-    dst = os.path.join(_DIR, f"trades.{tag}.bak.json")
+    src = account_context.path(_PATH)
+    dst = os.path.join(account_context.path(_DIR), f"trades.{tag}.bak.json")
     if os.path.isfile(src) and not os.path.isfile(dst):
         try:
             import shutil
@@ -199,8 +200,8 @@ def _backup_once(tag: str) -> None:
 
 
 def _save(trades: list[dict]) -> bool:
-    os.makedirs(_DIR, exist_ok=True)
-    return atomic_write_json(_PATH, {"schema": _SCHEMA, "trades": trades})
+    os.makedirs(account_context.path(_DIR), exist_ok=True)
+    return atomic_write_json(account_context.path(_PATH), {"schema": _SCHEMA, "trades": trades})
 
 
 def _market_context(date: str) -> dict:

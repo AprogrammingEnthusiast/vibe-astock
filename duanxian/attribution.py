@@ -30,6 +30,7 @@
 """
 
 from __future__ import annotations
+import account_context
 
 import glob
 import json
@@ -57,7 +58,7 @@ def _read_hits() -> dict[str, dict]:
     `hit is None`（判不了）**一律不计入**，不能把"不知道"当成"判错"。
     """
     out: dict[str, dict] = {}
-    for f in sorted(glob.glob(os.path.join(_REFL_DIR, "*.json"))):
+    for f in sorted(glob.glob(os.path.join(account_context.path(_REFL_DIR), "*.json"))):
         try:
             with open(f, encoding="utf-8") as fh:
                 d = json.load(fh)

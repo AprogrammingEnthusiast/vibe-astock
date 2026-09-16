@@ -49,6 +49,7 @@
 """
 
 from __future__ import annotations
+import account_context
 from .cache_policy import fresh as cache_fresh, write as write_cache
 
 import hashlib
@@ -427,7 +428,7 @@ def corpus_days() -> list[str]:
 
 
 def result_path(days: int) -> str:
-    return os.path.join(RESULT_DIR, f"last{days}.json")
+    return os.path.join(account_context.path(RESULT_DIR), f"last{days}.json")
 
 
 # 结果结构版本。**加了新字段就 +1** —— 否则旧缓存缺字段，界面看着正常但少东西。

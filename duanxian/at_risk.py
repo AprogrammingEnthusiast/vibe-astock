@@ -30,6 +30,7 @@
 """
 
 from __future__ import annotations
+import account_context
 
 import json
 import math
@@ -49,10 +50,10 @@ def load_equity_base() -> Optional[float]:
     ⚠️ 没填就是 None，**不要拿历史最大投入之类的东西估一个** —— 估大了占比偏小，
     正好在"有没有超限"这个判断上出错。
     """
-    if not os.path.exists(_BASE_PATH):
+    if not os.path.exists(account_context.path(_BASE_PATH)):
         return None
     try:
-        with open(_BASE_PATH, encoding="utf-8") as fh:
+        with open(account_context.path(_BASE_PATH), encoding="utf-8") as fh:
             env = json.load(fh)
         if not isinstance(env, dict) or env.get("schema") != _BASE_SCHEMA or isinstance(env.get("equity_base"), bool):
             raise ValueError()
@@ -71,8 +72,8 @@ def save_equity_base(value: float) -> dict:
         raise ValueError("账户规模必须是数字") from exc
     if isinstance(value, bool) or not math.isfinite(v) or v <= 0:
         raise ValueError("账户规模必须是正数")
-    os.makedirs(_DIR, exist_ok=True)
-    if not atomic_write_json(_BASE_PATH, {"schema": _BASE_SCHEMA, "equity_base": v}):
+    os.makedirs(account_context.path(_DIR), exist_ok=True)
+    if not atomic_write_json(account_context.path(_BASE_PATH), {"schema": _BASE_SCHEMA, "equity_base": v}):
         raise RuntimeError("账户规模写入失败")
     return {"ok": True, "equity_base": v}
 

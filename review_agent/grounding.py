@@ -11,6 +11,7 @@ import math
 import re
 import unicodedata
 from decimal import Decimal
+from difflib import get_close_matches
 from types import SimpleNamespace
 
 from .evidence import EvidenceError, METRIC_SCOPE, canonical, digest, display_number, has_generated_number, mask_qualitative_numbers, valid_date
@@ -32,7 +33,8 @@ CONTRACT = """只输出约定的 JSON。每段解释的 citations 必须引用�
 数量约定：分项 findings 为 1~5 段；每段 citations 为 1~6 个不重复 id。
 每段 text 最多 900 字、direction 板块名最多 50 字。若原任务列出更多解读角度，请合并为上述段落数。
 text / direction / reason 等自由文字只能写定性中文：禁止阿拉伯数字、汉字数量、日期、代码、百分比，
-也不要引用含数字的指标名或名称；数值、日期、计算结果由页面按所引证据原样展示，不要在解释中重写。
+含数字的股票、行业、概念题材名称可原样使用，但必须在本段所引证据的名称字段中出现；不得把数值句当作名称。
+direction 的名称须由 logic 的引用支持。数值、日期、计算结果由页面按所引证据原样展示，不要在解释中重写。
 汉字数量同样属于数字：不要写“两个板位”“三类生态”“近二十日”“四板、五板”或“十厘米”；
 改写为“中间梯队缺档”“不同交易制度样本”“近期”“高位梯队”“常规涨跌幅品种”。
 写法直白，少用成语和比喻。分项报告整篇约350字，优先3段：主要观察、反证与缺口、后续核验；合并重复说明，不逐条复述全目录。
@@ -172,7 +174,7 @@ def _text(value, maximum=900, names=()):
     numeric_text = _numeric_text(normalized, names)
     if (has_generated_number(numeric_text) or any(unicodedata.category(c) in {"Nl", "No"} for c in value)
             or NUMERIC_WORDS.search(numeric_text)):
-        raise EvidenceError("解释含自由生成数字；删去数值和含数字的名称，改用证据展示")
+        raise EvidenceError("解释含自由生成数字；删去数值，名称须引用包含该名称的证据条目")
     try:
         check_report_text(value)
     except LlmConfigError:
@@ -181,21 +183,52 @@ def _text(value, maximum=900, names=()):
 
 
 def _cited_names(records, refs):
+    # These boundaries come from data.py/theme_tree.py's host-owned renderers,
+    # not arbitrary sentences or names proposed by the model.
+    patterns = {
+        "get_leader_data": (
+            r"^\s*([^\s|｜,，、(（]{2,20})(?=\(\d+板·)",
+            r"^\s*(?:\d{4}-\d{2}-\d{2}|\d{8}): 最高\d+板 ([^\s()]{2,20})\([^()]*\)$",
+        ),
+        "get_market_facts": (
+            r"^· (.+?)［[^［］]+］涨停\d+",
+            r"(?:：|；)([^；：()]+)\(涨停\d+/最高",
+            r"\[[^\[\]]+\]([^()、]+)\(\d+板,",
+        ),
+        "get_theme_reasons": (r"(?:涨停题材串热度 TOP：|、)([^、×]+)×\d+",),
+        "get_macro_sector_data": (r"^\s+(.+?)：当日(?:涨幅)?[+-]?\d",),
+        "get_capital_data": (r"^\s+(.+?) 今[+-]?\d", r"^\s+(.+?) [+-]?\d+(?:\.\d+)?亿 涨", r"^\s+(.+?)：当日[+-]?\d"),
+        "get_dragon_tiger_data": (r"^\s+(.+?) 净买",),
+        "get_sentiment_data": (r"(?:连板梯队（2 板以上）：|、)([^、()]+)\(\d+板\)",),
+    }
     names = set()
     for record in records:
-        if record["id"] in refs and record.get("input") == "get_leader_data":
-            names.update(re.findall(r"(?m)^\s*([^\s|｜,，、(（]{2,20})(?=\(\d+板·)", record.get("text", "")))
-    return names
+        if record["id"] in refs:
+            for pattern in patterns.get(record.get("input"), ()):
+                names.update(re.findall(pattern, record.get("text", ""), re.M))
+    return {name for name in names if 2 <= len(name) <= 50
+            and re.fullmatch(r"[\w\u4e00-\u9fff*·（）()\-]+", name)
+            and re.search(r"[A-Za-z\u4e00-\u9fff]", name)}
 
 
 def _finding(obj, records):
     _keys(obj, ("text", "citations"))
     refs = _items(obj["citations"], 1, 6, "citations")
     allowed = {e["id"] for e in records}
-    if any(not isinstance(eid, str) or eid not in allowed for eid in refs) or len(set(refs)) != len(refs):
-        raise EvidenceError("引用不在本段可用目录内或引用重复")
-    # Only names in the cited host-formatted ladder rows can mask number-like
-    # characters (e.g. 百大集团). Attached quantities remain subject to the gate.
+    errors = []
+    for index, eid in enumerate(refs):
+        if not isinstance(eid, str) or eid not in allowed:
+            # Suggestions are host-owned IDs, never automatic substitutions:
+            # the model must check their meaning and pass exact membership again.
+            candidates = get_close_matches(eid, sorted(allowed), n=3, cutoff=0.7) if isinstance(eid, str) and len(eid) <= 64 else []
+            errors.append(f"citations[{index}]: 引用不在本段可用目录内；"
+                          + ("相近有效编号=" + canonical(candidates) + "，请核对证据含义后原样复制" if candidates
+                             else "请从本段目录重新选择支持该解释的有效编号"))
+    if errors:
+        raise EvidenceError("；".join(errors))
+    refs = list(dict.fromkeys(refs))
+    # Only names in cited host-formatted rows can mask number-like characters.
+    # Attached quantities remain subject to the gate.
     names = _cited_names(records, refs)
     text = _text(obj["text"], names=names)
     return {"text": text, "citations": refs}
@@ -239,7 +272,8 @@ def validate_summary(obj, records):
         if checked(path, lambda: _keys(direction, ("direction", "logic", "risk")) is None) is None:
             continue
         result["focus_directions"].append({
-            "direction": checked(path + ".direction", lambda: _text(direction["direction"], 50)),
+            "direction": checked(path + ".direction", lambda: _text(direction["direction"], 50, names=_cited_names(
+                records, direction["logic"].get("citations", []) if isinstance(direction["logic"], dict) else []))),
             "logic": checked(path + ".logic", lambda: _finding(direction["logic"], records)),
             "risk": checked(path + ".risk", lambda: _finding(direction["risk"], records))})
     seen = set()
@@ -294,7 +328,9 @@ def _mark_numeric_prose(value, records=()):
             continue
         # NFKC may expand characters; all offsets below refer to this editing copy.
         text = unicodedata.normalize("NFKC", item)
-        numeric = _numeric_text(text, _cited_names(records, value.get("citations", [])))
+        cited = value.get("logic") if key == "direction" else value
+        refs = cited.get("citations", []) if isinstance(cited, dict) else []
+        numeric = _numeric_text(text, _cited_names(records, refs))
         marked = set()
         for match in re.finditer(r"\d|[零〇一二两三四五六七八九十百千万亿壹贰叁肆伍陆柒捌玖拾佰仟萬億]", numeric):
             marked.update(range(match.start(), match.end()))
@@ -352,7 +388,7 @@ def request_checked(llm, prompt, context, validate):
                              "不要仅把阿拉伯数字改写成汉字，也不要只改最先报错的段落。"
                              "被拒原文的⟦⟧只标记按本次校验规则被拒的字形；每处标记都必须改写所在短语，不能只去括号保留原字。"
                              "例如首板晋级一档→首板晋级、这两组→这些、这一小样本→该样本、不止一回→反复。"
-                             "例如“一类标签”改为“这类标签”、“统一方向”改为“集中方向”。校对中新写的替代短语不要再包含一二三四五六七八九十百千万亿等数字字形；例如一组相关标签→相关标签、一类归因→该类归因，直接删去不必要的量词。未改动的有效行业名、标的名和引用保留，最终输出不可带⟦⟧。")
+                             "例如“一类标签”改为“这类标签”、“统一方向”改为“集中方向”。校对中新写的替代短语不要包含数量断言；来源名称仅允许使用本段引用所支持的原名，不因名称含数字字形而改名；例如一组相关标签→相关标签、一类归因→该类归因，直接删去不必要的量词。未改动的有效行业名、标的名和引用保留，最终输出不可带⟦⟧。")
             if attempt:
                 raise EvidenceError(f"AI 内容或引用未通过核对：{reason}；原报告已保留，请重新生成。") from None
             # Supply the rejected reply as untrusted data, not new evidence.

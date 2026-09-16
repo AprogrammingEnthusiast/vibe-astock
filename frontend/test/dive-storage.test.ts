@@ -8,7 +8,7 @@ function storage(fail=false) {
   let saved='{}';
   const source=readFileSync(new URL('../src/components/ui/DeepDive.tsx',import.meta.url),'utf8');
   const code=ts.transpileModule(source+'\nexport {loadStore,persistStore};', {compilerOptions:{module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.ReactJSX,target:ts.ScriptTarget.ES2022}}).outputText;
-  const context:any={exports:{},require:()=>({}),localStorage:{getItem:()=>saved,setItem:(_k:string,v:string)=>{if(fail)throw Error('quota');saved=v;}}};
+  const context:any={exports:{},require:()=>({accountKey:(key:string)=>key}),localStorage:{getItem:()=>saved,setItem:(_k:string,v:string)=>{if(fail)throw Error('quota');saved=v;}}};
   vm.runInNewContext(code,context);
   return {api:context.exports,raw:()=>JSON.parse(saved),seed:(value:string)=>{saved=value;}};
 }

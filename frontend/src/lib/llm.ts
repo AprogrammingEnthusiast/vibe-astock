@@ -1,3 +1,7 @@
+import { apiUrl } from "./base";
+import { authHeaders } from "./api";
+import type { HeadlineTranslationInput } from "./headline-translation";
+import { accountKey } from "@/lib/account";
 import { randomId } from "@/lib/random-id";
 // Every product AI entry reads the same explicitly tested connection.
 import { agentRequest, AgentRequestError, loadAgentConnection } from './agent-api';
@@ -37,8 +41,8 @@ export async function chatStream(messages: ChatMsg[], context: string, handlers:
     .map(b => b.toString(16).padStart(2,'0')).join('');
   const pendingKey = 'astock-page-chat-' + hash;
   let saved: string | null;
-  try { saved = sessionStorage.getItem(pendingKey); } catch { throw new ApiError('浏览器禁止会话存储，本次尚未发送 AI 请求；请允许存储后重试', 400); }
-  const forget = () => { try { sessionStorage.removeItem(pendingKey); } catch { toast.warning('回答状态未能从浏览器清除；请保留本次结果，勿重复提交'); } };
+  try { saved = sessionStorage.getItem(accountKey(pendingKey)); } catch { throw new ApiError('浏览器禁止会话存储，本次尚未发送 AI 请求；请允许存储后重试', 400); }
+  const forget = () => { try { sessionStorage.removeItem(accountKey(pendingKey)); } catch { toast.warning('回答状态未能从浏览器清除；请保留本次结果，勿重复提交'); } };
   let pending: {request_id:string; input:Omit<typeof input,'llm'>};
   if (saved) {
     try { pending = JSON.parse(saved); if(!/^[a-f0-9]{32}$/.test(pending.request_id)||!pending.input)throw new Error(); }
@@ -46,7 +50,7 @@ export async function chatStream(messages: ChatMsg[], context: string, handlers:
   } else {
     const {llm: _llm, ...snapshot} = input;
     pending = {request_id:randomId().replace(/-/g,''), input:snapshot};
-    try { sessionStorage.setItem(pendingKey, JSON.stringify(pending)); } catch { throw new ApiError('浏览器未能保存恢复记录，本次尚未发送 AI 请求；请释放存储空间后重试', 400); }
+    try { sessionStorage.setItem(accountKey(pendingKey), JSON.stringify(pending)); } catch { throw new ApiError('浏览器未能保存恢复记录，本次尚未发送 AI 请求；请释放存储空间后重试', 400); }
   }
   const {request_id} = pending;
   const body = {...pending.input, llm, request_id};
@@ -96,3 +100,22 @@ export async function chatStream(messages: ChatMsg[], context: string, handlers:
   } finally { signal?.removeEventListener('abort', cancel); }
 }
 export function chat(messages: ChatMsg[], context: string) { return chatStream(messages, context); }
+
+/** RSS 标题走一次性、无工具的受限翻译入口，不进入自由对话。 */
+export async function translateHeadlineBatch(
+  items: HeadlineTranslationInput[], signal?: AbortSignal,
+): Promise<Map<string, string>> {
+  const llm = loadAgentConnection();
+  if (!llm) throw new ApiError("尚未接入 AI，请先在「接入 AI」里配置", 400);
+  const resp = await fetch(apiUrl("/api/translate-headlines"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify({ items, llm }),
+    signal,
+  });
+  let body: { items?: { id: string; zh: string }[]; detail?: string } = {};
+  try { body = await resp.json(); } catch { /* 后端异常页 */ }
+  if (!resp.ok) throw new ApiError(body.detail || `HTTP ${resp.status}`, resp.status);
+  const allowed = new Set(items.map((item) => item.id));
+  return new Map((body.items || []).filter((item) => allowed.has(item.id)).map((item) => [item.id, item.zh]));
+}

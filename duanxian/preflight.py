@@ -76,6 +76,7 @@ def check(date: str, *, data_source=data) -> dict:
 
     missing_core: list[str] = []
     missing_optional: list[str] = []
+    warnings: list[str] = []
 
     for label, fname, is_core in _CHECKS:
         try:
@@ -84,6 +85,9 @@ def check(date: str, *, data_source=data) -> dict:
             text = f"[⚠️ {label} 体检取数异常：{type(exc).__name__}: {exc}]"
         if _looks_degraded(text):
             (missing_core if is_core else missing_optional).append(label)
+            if not is_core:
+                reason = text.strip() or "数据缺失，本次复盘少了这一路"
+                warnings.append(f"{label}：{reason}")
 
     return {
         "ok": not missing_core,
@@ -91,7 +95,7 @@ def check(date: str, *, data_source=data) -> dict:
         "missing_optional": missing_optional,
         # 给 review_store 落盘用：非核心的缺失要如实显示在界面上，
         # 不能像上次那样 warnings 是空的、看着一切正常。
-        "warnings": [f"{m}：数据缺失，本次复盘少了这一路" for m in missing_optional],
+        "warnings": warnings,
     }
 
 

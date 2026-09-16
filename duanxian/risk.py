@@ -21,6 +21,7 @@
 """
 
 from __future__ import annotations
+import account_context
 
 import json
 import math
@@ -58,10 +59,10 @@ _RULE_LABELS = {
 
 def load_rules() -> dict:
     """缺文件才用默认值；损坏配置必须显式报错，不能换回宽松阈值。"""
-    if not os.path.exists(_RULES_PATH):
+    if not os.path.exists(account_context.path(_RULES_PATH)):
         return {**DEFAULT_RULES, "_is_default": True}
     try:
-        with open(_RULES_PATH, encoding="utf-8") as fh:
+        with open(account_context.path(_RULES_PATH), encoding="utf-8") as fh:
             env = json.load(fh)
         if not isinstance(env, dict) or env.get("schema") != _RULES_SCHEMA or not isinstance(env.get("rules"), dict):
             raise ValueError()
@@ -102,8 +103,8 @@ def save_rules(rules: dict) -> dict:
     # 接受局部编辑，但不悄悄重置其余用户阈值。完整输入可显式修复坏配置。
     if set(clean) != set(DEFAULT_RULES):
         clean = {**{k: v for k, v in load_rules().items() if k in DEFAULT_RULES}, **clean}
-    os.makedirs(_DIR, exist_ok=True)
-    if not atomic_write_json(_RULES_PATH, {"schema": _RULES_SCHEMA, "rules": clean}):
+    os.makedirs(account_context.path(_DIR), exist_ok=True)
+    if not atomic_write_json(account_context.path(_RULES_PATH), {"schema": _RULES_SCHEMA, "rules": clean}):
         raise RuntimeError("风险宪法写入失败")
     return {"ok": True, "rules": clean}
 

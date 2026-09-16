@@ -1,5 +1,6 @@
 """Explicit page/report questions using the selected source and bounded public tools."""
 from __future__ import annotations
+import account_context
 import json
 import threading
 import time
@@ -51,7 +52,7 @@ class ChatJobs(Daily):
         if payload.get('task_kind') == 'backtest' and payload.get('backtest_args'):
             self.current['backtest_spec'] = payload['backtest_args']
         self._update()
-        self.worker = threading.Thread(target=self._work, args=(payload, source, key), daemon=True)
+        self.worker = account_context.thread(target=self._work, args=(payload, source, key), daemon=True)
         self.worker.start()
         return self.snapshot()
 

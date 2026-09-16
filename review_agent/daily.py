@@ -4,6 +4,7 @@ Host code freezes dated inputs. Models have no tools. Grounded prose is
 qualitative; source quotes and deterministic numerical comparisons are host-owned.
 """
 from __future__ import annotations
+import account_context
 
 import json
 import re
@@ -223,14 +224,19 @@ class Daily:
             raise EvidenceError("目标日为周末非交易日，请选择已收盘交易日")
         if not trade_calendar.is_settled(date):
             raise EvidenceError(f"目标日尚未收盘，请选择最近已收盘的交易日：{trade_calendar.latest_session() or '暂未查到'}")
-        if not body.force and review_store.usable(review_store.load(date)):
+        import sharing_worker
+        try:
+            shared = sharing_worker.shared_review(date) if sharing_worker.ENABLED else None
+        except RuntimeError as exc:
+            raise EvidenceError(str(exc)) from None
+        if review_store.complete(shared) or review_store.complete(review_store.load(date)):
             return {"already_done": True, "date": date, "running": False}
         self.cancel_event = threading.Event()
         self.current = {"job_id": body.request_id, "fingerprint": fingerprint, "date": date,
                         "source": source, "running": True, "status": "running", "stage": "核对输入资料",
                         "started": time.time(), "elapsed": 0, "error": None}
         self._update()
-        self.worker = threading.Thread(target=self._work, args=(date, source, key), daemon=True)
+        self.worker = account_context.thread(target=self._work, args=(date, source, key), daemon=True)
         self.worker.start()
         return self.snapshot()
 

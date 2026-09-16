@@ -373,6 +373,8 @@ export interface Scoreboard {
 
 export interface AnalystReport { key: string; title: string; tag: string; html: string; }
 export interface ReviewData {
+  publication?: { id: string; author: string; published_at: number; shared: boolean };
+  complete?: boolean;
   report_grounding?: import("./report-grounding").GroundedReport;
   target_date?: string;
   trade_date?: string;
@@ -422,7 +424,7 @@ export interface WeeklyData {
   leader_lineage: LineageLeader[];
 }
 
-export interface JobStatus { running: boolean; elapsed?: number; error?: string | null; stock?: string; busy?: boolean; }
+export interface JobStatus { running: boolean; elapsed?: number; error?: string | null; stock?: string; busy?: boolean; publication_pending?: boolean; }
 
 // ---------- 交易日志（journal.py）----------
 export interface MarketCtx {

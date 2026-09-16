@@ -12,7 +12,8 @@ from .evidence import EvidenceError, canonical
 
 QUERY_CALLS = {"query_quote", "query_valuation", "query_reports", "query_news", "query_global_stock"}
 MIGRATED_CALLS = {"run_backtest", "macro_probability"}
-DEEPDIVE_CALLS = {"resolve", "get_profile", "get_theme", "get_lhb", "get_kline"}
+DEEPDIVE_CALLS = {"resolve", "get_profile", "get_theme", "get_lhb", "get_kline",
+                  "get_long_term", "get_sector_context", "get_capital_context", "get_risk_context"}
 
 
 def fetch_public(name, args, directory, check, *, timeout=90):

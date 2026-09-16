@@ -92,8 +92,11 @@ def _read_snapshot(path: Path) -> tuple[dict, str]:
     return value, hashlib.sha256(raw).hexdigest()
 
 
-def build_bundle(root: Path, anchor: str) -> dict:
+def build_bundle(root: Path, anchor: str, *, shared: bool = True, version: str = "") -> dict:
     """Read at most twenty dated snapshots, never `latest.json` or future days."""
+    import sharing_worker
+    if shared and sharing_worker.ENABLED:
+        return sharing_worker.shared_bundle(anchor, version)
     valid_date(anchor)
     candidates = sorted((p for p in root.glob("*.json")
                          if re.fullmatch(r"\d{4}-\d{2}-\d{2}", p.stem) and p.stem <= anchor), reverse=True)

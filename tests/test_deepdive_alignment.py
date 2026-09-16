@@ -62,7 +62,8 @@ def test_dd_source_stage_idempotency_and_old_archive(tmp_path, monkeypatch):
     finally: m.shutdown()
 
 
-@pytest.mark.parametrize("result", [{"error": "行情不可用"}, {**final(), "verdict_struct": None}])
+@pytest.mark.parametrize("result", [{"error": "行情不可用"}, {**final(), "verdict_struct": None},
+                                    {**final(), "theme_report": "[⚠️ 题材与资讯资料均不可用]"}])
 def test_dd_failure_preserves_previous(tmp_path, monkeypatch, result):
     m = manager(tmp_path)
     old = b'{"code":"000001","verdict_md":"old"}'

@@ -1,16 +1,17 @@
-import { EventsProbability } from "@/components/workspace/EventsProbability";
 import { useState, useEffect, useCallback, useRef } from "react";
 import { Link } from "react-router-dom";
 import { TrendingUp, FileText, Newspaper, Rss, RefreshCw, Loader2, ExternalLink, AlertCircle, Sparkles, Lightbulb, Star } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { EventsPanel } from "@/components/EventsPanel";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { GlassCard } from "@/components/ui/GlassCard";
 import { Disclaimer } from "@/components/ui/Disclaimer";
 import { SaveNoteButton } from "@/components/ui/SaveNoteButton";
 import { api, ApiError, type RadarData, type Industry, type Announcement, type NewsItem } from "@/lib/api";
+import { displayedHeadlineTranslation, hasChinese, loadHeadlineTranslationCache, missingHeadlineTranslations, saveHeadlineTranslationCache, splitHeadlineBatches } from "@/lib/headline-translation";
 import { loadWatch } from "@/lib/watchlist";
-import { hasLlm, chatStream } from "@/lib/llm";
+import { hasLlm, chatStream, translateHeadlineBatch } from "@/lib/llm";
 import { cn } from "@/lib/utils";
 
 const TABS = [
@@ -23,6 +24,12 @@ const TABS = [
 ];
 
 interface Digest { loading?: boolean; text?: string; err?: string; needKey?: boolean; sources?: Industry['items'] }
+interface TitleTranslation {
+  status: "running" | "done" | "partial" | "need-key";
+  done: number;
+  total: number;
+  error?: string;
+}
 
 function InvestmentNewsPanel() {
   const [data, setData] = useState<RadarData | null>(null);
@@ -32,6 +39,11 @@ function InvestmentNewsPanel() {
   const inflight = useRef(new Set<string>());
   const [digests, setDigests] = useState<Record<string, Digest>>({});
   const [bulk, setBulk] = useState<{ running: boolean; done: number; total: number }>({ running: false, done: 0, total: 0 });
+  const [titleTranslations, setTitleTranslations] = useState<Record<string, TitleTranslation>>({});
+  const translationCache = useRef(loadHeadlineTranslationCache());
+  const attemptedGeneration = useRef(new Set<string>());
+  const latestTranslationRun = useRef(new Map<string, string>());
+  const [, redrawTranslations] = useState(0);
 
   useEffect(() => {
     api.radar().then(setData).catch((e) => setErr(e instanceof ApiError ? e.message : "加载失败"));
@@ -48,13 +60,65 @@ function InvestmentNewsPanel() {
   const cur = industries.find((i) => i.key === active) || industries[0];
   const hasData = !!data?.generated_at;
 
+  const translateIndustry = useCallback(async (ind: Industry, generation: string, force = false) => {
+    if (!hasLlm()) {
+      setTitleTranslations((s) => ({ ...s, [ind.key]: { status: "need-key", done: 0, total: ind.items.length } }));
+      return;
+    }
+    const runId = `${generation}\0${force ? Date.now() : "auto"}`;
+    latestTranslationRun.current.set(ind.key, runId);
+    const cache = translationCache.current;
+    const completed = new Set<string>();
+    const doneCount = () => ind.items.filter((it) =>
+      hasChinese(it.title) || (force ? completed.has(it.title) : Boolean(it.zh || cache.has(it.title))),
+    ).length;
+    const targets = missingHeadlineTranslations(ind.items, cache, force);
+    if (!targets.length) {
+      setTitleTranslations((s) => ({ ...s, [ind.key]: { status: "done", done: ind.items.length, total: ind.items.length } }));
+      return;
+    }
+    setTitleTranslations((s) => ({ ...s, [ind.key]: { status: "running", done: doneCount(), total: ind.items.length } }));
+    const errors: string[] = [];
+    for (const batch of splitHeadlineBatches(targets)) {
+      try {
+        const got = await translateHeadlineBatch(batch);
+        for (const item of batch) {
+          const zh = got.get(item.id);
+          if (zh) { cache.set(item.title, zh); completed.add(item.title); }
+        }
+        saveHeadlineTranslationCache(cache);
+        redrawTranslations((n) => n + 1);
+      } catch (e) {
+        errors.push(e instanceof Error ? e.message : "翻译失败");
+      }
+      if (latestTranslationRun.current.get(ind.key) === runId) {
+        setTitleTranslations((s) => ({ ...s, [ind.key]: { status: "running", done: doneCount(), total: ind.items.length } }));
+      }
+    }
+    if (latestTranslationRun.current.get(ind.key) !== runId) return;
+    const done = doneCount();
+    setTitleTranslations((s) => ({ ...s, [ind.key]: done === ind.items.length
+      ? { status: "done", done, total: ind.items.length }
+      : { status: "partial", done, total: ind.items.length, error: errors[0] || "模型漏回了部分标题" },
+    }));
+  }, []);
+
+  useEffect(() => {
+    if (!cur || !hasData || refreshing) return;
+    const generation = data?.generated_at || "archive";
+    const key = `${cur.key}\0${generation}`;
+    if (attemptedGeneration.current.has(key)) return;
+    attemptedGeneration.current.add(key);
+    void translateIndustry(cur, generation);
+  }, [cur, data?.generated_at, hasData, refreshing, translateIndustry]);
+
   const genDigest = async (ind: Industry) => {
     if (!hasLlm()) { setDigests((d) => ({ ...d, [ind.key]: { needKey: true } })); return; }
     if (inflight.current.has(ind.key)) return;
     inflight.current.add(ind.key);
     const sources = ind.items.slice(0, 25).map(it => ({ ...it }));
     setDigests((d) => ({ ...d, [ind.key]: { loading: true, sources } }));
-    const ctx = sources.map((it) => `[${it.time}] ${it.source}｜${it.zh || it.title}`).join("\n");
+    const ctx = sources.map((it) => `[${it.time}] ${it.source}｜${displayedHeadlineTranslation(it, translationCache.current) || it.title}`).join("\n");
     const prompt =
       `以下是「${ind.name}」赛道近期资讯。请提炼「近7日要点」3-5 条：每条一句话（≤40 字），` +
       `输入只有标题，未读取全文，不要把标题推断写成已核实事实。只客观陈述事件，不推荐标的、不预测涨跌、不构成建议。直接用「- 」列点，不要多余前后缀。\n\n${ctx}`;
@@ -82,6 +146,7 @@ function InvestmentNewsPanel() {
   };
 
   const dg = cur ? digests[cur.key] : undefined;
+  const tr = cur ? titleTranslations[cur.key] : undefined;
 
   return (
     <div>
@@ -135,7 +200,29 @@ function InvestmentNewsPanel() {
 
           {cur && (
             <>
-              {/* 近7日要点总结框（暖橙框） */}
+              <div className="mb-3 flex min-h-7 flex-wrap items-center justify-between gap-2 text-xs">
+                <span className="text-muted-foreground" role="status" aria-atomic="true">
+                  {tr?.status === "running" ? (
+                    <span className="inline-flex items-center gap-1.5 text-primary"><Loader2 aria-hidden="true" className="h-3.5 w-3.5 animate-spin" /> AI 正在翻译标题 {tr.done}/{tr.total}</span>
+                  ) : tr?.status === "done" ? (
+                    <span className="text-success">AI 标题翻译 {tr.done}/{tr.total}</span>
+                  ) : tr?.status === "partial" ? (
+                    <span className="text-warning">标题已翻译 {tr.done}/{tr.total}，其余保留原文{tr.error ? `（${tr.error}）` : ""}</span>
+                  ) : tr?.status === "need-key" ? (
+                    <span>标题尚未翻译 · <Link to="/settings" className="text-primary">先接入 AI</Link></span>
+                  ) : (
+                    <span>标题翻译将在资讯加载后自动开始</span>
+                  )}
+                </span>
+                {(tr?.status === "partial" || tr?.status === "done" || tr?.status === "need-key") && (
+                  <button onClick={() => void translateIndustry(cur, data?.generated_at || "manual", tr.status === "done")}
+                    disabled={refreshing} className="min-h-7 px-2 text-muted-foreground hover:text-primary disabled:opacity-50">
+                    {tr.status === "done" ? "重新翻译" : "继续翻译"}
+                  </button>
+                )}
+              </div>
+
+              {/* 今日要点总结框（暖橙框） */}
               <div className="mb-4 rounded-xl border border-primary/30 bg-primary/5 p-4">
                 <div className="mb-2 flex items-center justify-between">
                   <span className="flex items-center gap-1.5 text-sm font-semibold text-primary">
@@ -172,15 +259,21 @@ function InvestmentNewsPanel() {
                 {cur.items.length === 0 ? (
                   <p className="py-6 text-center text-sm text-muted-foreground/60">近 {data!.recent_days} 天该赛道暂无更新</p>
                 ) : (
-                  cur.items.map((it, i) => (
-                    <a key={i} href={/^https?:\/\//i.test(it.url) ? it.url : undefined} target="_blank" rel="noopener noreferrer"
-                      className="group flex items-baseline gap-3 border-b border-border/30 pb-2 text-sm last:border-0">
-                      <span className="w-24 shrink-0 font-mono text-xs text-muted-foreground/70">{it.time}</span>
-                      <span className="w-20 shrink-0 truncate text-xs text-muted-foreground">{it.source}</span>
-                      <span className="flex-1 group-hover:text-primary">{it.zh || it.title}</span>
-                      <ExternalLink className="mt-0.5 h-3 w-3 shrink-0 text-muted-foreground/0 group-hover:text-primary/60" />
-                    </a>
-                  ))
+                  cur.items.map((it, i) => {
+                    const zh = displayedHeadlineTranslation(it, translationCache.current);
+                    return (
+                      <a key={i} href={/^https?:\/\//i.test(it.url) ? it.url : undefined} target="_blank" rel="noopener noreferrer"
+                        className="group flex items-start gap-3 border-b border-border/30 pb-2 text-sm last:border-0">
+                        <span className="w-24 shrink-0 pt-0.5 font-mono text-xs text-muted-foreground/70">{it.time}</span>
+                        <span className="w-20 shrink-0 truncate pt-0.5 text-xs text-muted-foreground">{it.source}</span>
+                        <span className="min-w-0 flex-1">
+                          <span className="block group-hover:text-primary">{zh || it.title}</span>
+                          {zh && zh !== it.title && <span className="mt-0.5 block text-xs leading-relaxed text-muted-foreground/65">{it.title}</span>}
+                        </span>
+                        <ExternalLink className="mt-1 h-3 w-3 shrink-0 text-muted-foreground/0 group-hover:text-primary/60" />
+                      </a>
+                    );
+                  })
                 )}
               </div>
             </>
@@ -322,6 +415,7 @@ export function Intel() {
         {TABS.map(({ key, label, icon: Icon, integrated, planned }) => (
           <button key={key} onClick={() => !planned && setTab(key)}
             disabled={planned}
+            aria-pressed={tab === key}
             title={planned ? "还没接数据源" : undefined}
             className={cn("inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm transition-colors",
               planned ? "cursor-not-allowed text-muted-foreground/40"
@@ -343,7 +437,7 @@ export function Intel() {
         {cur.key === "investment-news" ? (
           <InvestmentNewsPanel />
         ) : cur.key === "events" ? (
-          <EventsProbability />
+          <EventsPanel />
         ) : cur.key === "filings" ? (
           <WatchlistFeed kind="filings" />
         ) : cur.key === "news" ? (

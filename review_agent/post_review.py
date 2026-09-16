@@ -4,6 +4,7 @@ Each result is retained next to the generation evidence. Network/data failures
 are explicit and may be retried without regenerating a paid AI report.
 """
 from threading import Lock
+import account_context
 
 _CAPTURE_LOCK = Lock()
 
@@ -52,10 +53,17 @@ def capture_bounded(date: str, check=None, timeout: float = 90) -> dict:
     try:
         with tempfile.TemporaryDirectory(prefix="astock-capture-") as directory:
             result_path = Path(directory) / "result.json"
+            env = None
+            if account_context.ENABLED:
+                from review_agent.runtime import engine_environment
+                # A dedicated bounded subprocess gets only this account's HOME,
+                # not the shared-app flag or server credentials. It cannot select another account.
+                env = engine_environment(account_context.home() / ".codex")
+                env["VR_DATA_DIR"] = str(account_context.home() / ".vibe-research")
             process = subprocess.Popen([sys.executable, "-m", "review_agent.post_review", date, str(result_path)],
                                        cwd=Path(__file__).resolve().parents[1],
                                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                       start_new_session=True)
+                                       start_new_session=True, env=env)
             deadline = time.monotonic() + timeout
             while process.poll() is None:
                 if check is not None:

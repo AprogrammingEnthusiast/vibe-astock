@@ -1,3 +1,4 @@
+import { accountKey } from "@/lib/account";
 import { randomId } from "@/lib/random-id";
 import { useSearchParams } from 'react-router-dom';
 import { useEffect, useRef, useState } from "react";
@@ -32,7 +33,7 @@ export function DeepDive() {
   const alive = useRef(true);
   const displayRevision = useRef(0);
   const acceptedKey = "astock-deepdive-accepted";
-  const target = useRef(sessionStorage.getItem(acceptedKey) || "");
+  const target = useRef(sessionStorage.getItem(accountKey(acceptedKey)) || "");
   type Job = JobStatus & { job_id?: string; stage?: string; status?: string; state_warning?: string };
   type Pending = { stock: string; request_id: string; llm: AgentConnection };
   const pendingKey = "astock-deepdive-pending";
@@ -50,7 +51,7 @@ export function DeepDive() {
     try {
       const st = await agentRequest<Job>(`/deepdive${target.current ? `?job_id=${target.current}` : ""}`);
       if (!alive.current) return;
-      if (st.job_id && !target.current) { target.current = st.job_id; sessionStorage.setItem(acceptedKey, st.job_id); }
+      if (st.job_id && !target.current) { target.current = st.job_id; sessionStorage.setItem(accountKey(acceptedKey), st.job_id); }
       setJobId(st.job_id || ""); setElapsed(st.elapsed || 0); setStage(st.stage || "");
       setRunning(Boolean(st.running)); polling.current = Boolean(st.running);
       if (st.running) { timer.current = setTimeout(pollOnce, 1500); return; }
@@ -69,7 +70,7 @@ export function DeepDive() {
   useEffect(() => {
     alive.current = true;
     void loadLatest();
-    if (sessionStorage.getItem(pendingKey)) setRecovery(true);
+    if (sessionStorage.getItem(accountKey(pendingKey))) setRecovery(true);
     void pollOnce();
     return () => { alive.current = false; if (timer.current) clearTimeout(timer.current); };
     // Restoration only reads state; it never starts a paid run.
@@ -80,7 +81,7 @@ export function DeepDive() {
     if (polling.current) return;
     let body: Pending;
     if (retry) {
-      try { body = JSON.parse(sessionStorage.getItem(pendingKey) || "null"); }
+      try { body = JSON.parse(sessionStorage.getItem(accountKey(pendingKey)) || "null"); }
       catch { setMsg("待恢复请求已损坏，请重新选择标的"); return; }
       if (!body) { setRecovery(false); void pollOnce(); return; }
     } else {
@@ -88,21 +89,21 @@ export function DeepDive() {
       if (!llm) { workspace.connect(); return; }
       if (!stock.trim() || stock.trim().length > 40) { setMsg("请输入 40 字以内的代码或准确简称"); return; }
       body = { stock: stock.trim(), request_id: randomId().replace(/-/g, ""), llm };
-      try { sessionStorage.setItem(pendingKey, JSON.stringify(body)); }
+      try { sessionStorage.setItem(accountKey(pendingKey), JSON.stringify(body)); }
       catch { setMsg("无法保存任务恢复标识，未发起深挖"); return; }
     }
     polling.current = true; setRunning(true); setMsg("");
     try {
       const st = await agentRequest<Job>("/deepdive", body);
-      if (st.job_id) { target.current = st.job_id; sessionStorage.setItem(acceptedKey, st.job_id); }
-      sessionStorage.removeItem(pendingKey);
+      if (st.job_id) { target.current = st.job_id; sessionStorage.setItem(accountKey(acceptedKey), st.job_id); }
+      sessionStorage.removeItem(accountKey(pendingKey));
       if (!alive.current) return;
       setRecovery(false); setJobId(st.job_id || "");
       await pollOnce();
     } catch (error) {
       polling.current = false;
       if (error instanceof AgentRequestError && error.status >= 400 && error.status < 500) {
-        sessionStorage.removeItem(pendingKey);
+        sessionStorage.removeItem(accountKey(pendingKey));
         if (alive.current) { setRunning(false); setRecovery(false); setMsg(error.message); }
         return;
       }
@@ -150,7 +151,7 @@ export function DeepDive() {
       </div>
 
       <p className="text-xs text-muted-foreground">本次任务使用已保存的 AI 来源获取公开资料并执行四维分析与辩论，不改变首页 Agent 开关。{stage && `当前阶段：${stage}`}</p>
-      {!running && <button onClick={() => { target.current = ""; sessionStorage.removeItem(acceptedKey); void loadLatest(); void pollOnce(); }} className="rounded-lg border border-border px-3 py-2 text-sm">查看最近完成报告</button>}
+      {!running && <button onClick={() => { target.current = ""; sessionStorage.removeItem(accountKey(acceptedKey)); void loadLatest(); void pollOnce(); }} className="rounded-lg border border-border px-3 py-2 text-sm">查看最近完成报告</button>}
       {running && <button onClick={cancel} className="flex items-center gap-2 rounded-lg border border-border px-3 py-2 text-sm"><Square size={14} />取消本次深挖</button>}
       {recovery && !running && <button onClick={() => deepdive(true)} className="rounded-lg border border-border px-3 py-2 text-sm">恢复本次请求 / 查询状态</button>}
       {msg && <div className="glass rounded-xl px-4 py-3 text-sm text-muted-foreground">{msg}</div>}

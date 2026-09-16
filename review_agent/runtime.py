@@ -6,6 +6,7 @@ and forbidden execution-event checks remain necessary.
 from __future__ import annotations
 
 import json
+import account_context
 import os
 import queue
 import re
@@ -90,6 +91,8 @@ def connection(llm: dict) -> tuple[dict, str]:
     if not isinstance(model, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,99}", model):
         raise EvidenceError("模型名称无效")
     provider = llm.get("provider")
+    if account_context.ENABLED and provider not in {"codex-private", "openai", "mimo", "api-compatible"}:
+        raise EvidenceError("共享站点仅支持本人的 Codex 登录或 API Key")
     if provider in ("codex-private", "claude", "codebuddy"):
         return {"provider": provider, "model": model}, ""
     base = llm.get("baseURL", "")
@@ -107,6 +110,12 @@ def connection(llm: dict) -> tuple[dict, str]:
     if not valid or (provider != "api-compatible" and base.rstrip("/") not in allowed):
         raise EvidenceError("请填写 HTTPS Responses API 地址；不支持带凭据、查询参数或非标准端口的地址")
     base = base.rstrip("/")
+    if account_context.ENABLED:
+        from vr.chat import _check_base_url
+        try:
+            _check_base_url(base)
+        except RuntimeError as exc:
+            raise EvidenceError(str(exc)) from None
     key = llm.get("apiKey", "")
     if not isinstance(key, str) or not key.strip() or len(key) > 1024 or any(c.isspace() for c in key):
         raise EvidenceError("API 密钥无效，请检查接入 AI 设置")
@@ -124,7 +133,7 @@ def toml(value) -> str:
 def foreign_skills() -> list[dict]:
     # Codex discovers ~/.agents/skills independently of CODEX_HOME. Follow
     # directory links, not SKILL.md links, with bounded breadth-first discovery.
-    pending = deque([(Path.home() / ".agents/skills", 0)])
+    pending = deque([(account_context.home() / ".agents/skills", 0)])
     seen, paths = set(), set()
     entries_seen = 0
     while pending:
@@ -155,6 +164,8 @@ def engine_environment(home: Path, key: str = "") -> dict:
              "http_proxy", "https_proxy", "all_proxy", "no_proxy")
     env = {k: os.environ[k] for k in names if k in os.environ}
     env.update(CODEX_HOME=str(home), NO_COLOR="1")
+    if account_context.ENABLED:
+        env.update(HOME=str(account_context.home()), USERPROFILE=str(account_context.home()))
     if key:
         env["ASTOCK_MODEL_KEY"] = key
     return env

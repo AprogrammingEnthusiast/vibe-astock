@@ -43,6 +43,7 @@
 """
 
 from __future__ import annotations
+import account_context
 
 import json
 import os
@@ -58,7 +59,7 @@ _ARCHIVE_SCHEMA = 1
 
 
 def _day_dir(date: str) -> str:
-    return os.path.join(_DIR, date)
+    return os.path.join(account_context.path(_DIR), date)
 
 
 def path_of(date: str, slug: str) -> str:
@@ -121,7 +122,7 @@ def get(date: str, slug: str) -> Optional[dict]:
 def days(slug: Optional[str] = None) -> list[str]:
     """已归档的交易日（升序）。给 slug 则只算有该份数据的日子。"""
     try:
-        ds = sorted(d for d in os.listdir(_DIR) if not d.startswith("."))
+        ds = sorted(d for d in os.listdir(account_context.path(_DIR)) if not d.startswith("."))
     except FileNotFoundError:
         return []
     if slug is None:

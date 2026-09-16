@@ -11,6 +11,9 @@ from .evidence import EvidenceError, canonical
 
 
 def bridge_environment(home, agent: str) -> dict:
+    import account_context
+    if account_context.ENABLED:
+        raise EvidenceError("共享站点仅支持本人的 Codex 登录或 API Key")
     from .runtime import engine_environment
     env = engine_environment(home)
     # Explicit binary locations, never inherit API routing/credentials from server.

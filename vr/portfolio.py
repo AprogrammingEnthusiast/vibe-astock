@@ -10,6 +10,7 @@
 """
 
 from __future__ import annotations
+import account_context
 
 import json
 import os
@@ -31,12 +32,14 @@ _LOCK = threading.Lock()
 
 def _migrate_legacy() -> None:
     """旧版持仓在仓库内 .cache/ 里，重下载项目会丢；迁到用户目录（新位置已有则不动）。"""
+    if account_context.ENABLED:
+        return
     try:
-        if not os.path.exists(PF_FILE) and os.path.exists(_OLD_PF_FILE):
-            os.makedirs(CACHE_DIR, exist_ok=True)
-            tmp = PF_FILE + ".migrate.tmp"
+        if not os.path.exists(account_context.path(PF_FILE)) and os.path.exists(_OLD_PF_FILE):
+            os.makedirs(account_context.path(CACHE_DIR), exist_ok=True)
+            tmp = account_context.path(PF_FILE) + ".migrate.tmp"
             shutil.copy2(_OLD_PF_FILE, tmp)
-            os.replace(tmp, PF_FILE)  # 原子落位：复制中断不会留半截 portfolio.json 挡住下次重试
+            os.replace(tmp, account_context.path(PF_FILE))  # 原子落位：复制中断不会留半截 portfolio.json 挡住下次重试
     except OSError as e:
         # 迁移失败不阻塞启动，但要出声——旧数据原样保留在 _OLD_PF_FILE，可手工复制
         print(f"[vibe-research] 持仓数据迁移失败（旧数据仍在 {_OLD_PF_FILE}）: {e}", file=sys.stderr)
@@ -51,7 +54,7 @@ def _now() -> str:
 
 def _load() -> dict:
     try:
-        with open(PF_FILE, encoding="utf-8") as f:
+        with open(account_context.path(PF_FILE), encoding="utf-8") as f:
             return json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         return {"holdings": [], "last_refresh": None}
@@ -59,11 +62,11 @@ def _load() -> dict:
 
 def _save(d: dict) -> None:
     # 先写临时文件再原子改名：并发读若撞上写中途的半截 JSON，会被 _load 静默当成空持仓
-    os.makedirs(CACHE_DIR, exist_ok=True)
-    tmp = PF_FILE + ".tmp"
+    os.makedirs(account_context.path(CACHE_DIR), exist_ok=True)
+    tmp = account_context.path(PF_FILE) + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(d, f, ensure_ascii=False)
-    os.replace(tmp, PF_FILE)
+    os.replace(tmp, account_context.path(PF_FILE))
 
 
 def add_holding(code: str, shares: float, cost: float) -> dict:

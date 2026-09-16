@@ -456,7 +456,7 @@ export function StockData() {
                 {margin[0] && <Metric k="融资余额" v={yi(margin[0].rzye)} sub={margin[0].date} />}
                 {margin[0] && <Metric k="融券余额" v={yi(margin[0].rqye)} />}
                 {holders[0] && <Metric k="股东户数" v={Number(holders[0].holder_num).toLocaleString()} sub={`环比 ${pct(holders[0].change_ratio)}`} />}
-                {fundFlow.length > 0 && <Metric k="近20日主力净流入" v={yi(fundFlow.slice(-20).reduce((s, r) => s + r.main_net, 0))} />}
+                {fundFlow.length >= 20 && <Metric k="近20日主力净流入" v={fundFlow.slice(-20).some(r => r.main_net == null) ? "资料不完整" : yi(fundFlow.slice(-20).reduce((s, r) => s + r.main_net!, 0))} />}
                 {dividend[0] && <Metric k="最近派息(每10股)" v={`${dividend[0].bonus_rmb} 元`} sub={dividend[0].date} />}
               </div>
               {blockT.length > 0 && (
@@ -518,11 +518,11 @@ export function StockData() {
                 <div className="mb-3 rounded-lg border border-warning/30 bg-warning/5 p-3">
                   <p className="mb-1.5 text-xs font-medium text-warning">未来 90 天待解禁（{lockup.upcoming.length}）</p>
                   {lockup.upcoming.slice(0, 4).map((h, i) => (
-                    <div key={i} className="flex items-center gap-3 text-xs"><span className="w-20 shrink-0 font-mono text-muted-foreground">{h.date}</span><span className="flex-1 truncate">{h.type}</span><span className="shrink-0 text-muted-foreground">占比 {pct(h.ratio)}</span></div>
+                    <div key={i} className="flex items-center gap-3 text-xs"><span className="w-20 shrink-0 font-mono text-muted-foreground">{h.date}</span><span className="flex-1 truncate">{h.type}</span><span className="shrink-0 text-muted-foreground">占比 {pct(h.ratio == null ? null : h.ratio * 100)}</span></div>
                   ))}
                 </div>
               ) : (
-                <p className="mb-2 text-xs text-muted-foreground/70">未来 90 天无待解禁。</p>
+                <p className="mb-2 text-xs text-muted-foreground/70">接口未查到未来 90 天待解禁记录，不代表没有相关事项。</p>
               )}
               {lockup.history.length > 0 && (
                 <div>

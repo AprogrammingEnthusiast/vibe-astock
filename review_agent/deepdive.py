@@ -16,7 +16,8 @@ class FrozenStockInputs:
         self.directory, self.check, self.values = directory, check, {}
 
     def __getattr__(self, name):
-        if name not in {"resolve", "get_profile", "get_theme", "get_lhb", "get_kline"}:
+        from .public_worker import DEEPDIVE_CALLS
+        if name not in DEEPDIVE_CALLS:
             raise AttributeError(name)
         def read(*args):
             self.check()

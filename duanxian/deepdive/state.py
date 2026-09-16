@@ -21,6 +21,8 @@ class StockDeepDiveState(TypedDict):
     name: Annotated[str, "股票名称"]
     trade_date: Annotated[str, "深挖基准交易日"]
     profile: Annotated[str, "实时行情快照（run 开始时取一次，各分析师共享）"]
+    kline: Annotated[str, "已收盘K线统计（各分析师共享的原始材料）"]
+    supplement: Annotated[dict[str, str], "长期技术、板块、资金、风险补充资料及缺失状态"]
 
     theme_report: Annotated[str, "① 题材归属"]
     capital_report: Annotated[str, "② 资金流向"]

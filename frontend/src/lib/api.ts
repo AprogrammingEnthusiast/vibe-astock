@@ -269,20 +269,20 @@ export interface MarginRow { date: string; rzye: number; rzmre: number; rzche: n
 export interface BlockTradeRow { date: string; price: number; close: number; premium_pct: number; vol: number; amount: number; buyer: string; seller: string }
 export interface HolderRow { date: string; holder_num: number; change_ratio: number; avg_shares: number }
 export interface DividendRow { date: string; bonus_rmb: number; transfer_ratio: number; bonus_ratio: number | null; plan: string }
-export interface FundFlowRow { date: string; main_net: number; small_net: number; mid_net: number; large_net: number; super_net: number }
+export interface FundFlowRow { date: string; main_net: number | null; small_net: number | null; mid_net: number | null; large_net: number | null; super_net: number | null }
 export interface DtSeat { name: string; buy_amt: number; sell_amt: number; net: number }
 export interface DragonTiger {
   records: { date: string; reason: string; net_buy: number; turnover: number }[];
   seats: { buy: DtSeat[]; sell: DtSeat[] };
   institution: { buy_amt: number; sell_amt: number; net_amt: number };
 }
-export interface LockupRow { date: string; type: string; shares: number; able_shares: number; ratio: number }
+export interface LockupRow { date: string; type: string; shares: number | null; able_shares: number | null; ratio: number | null }
 export interface Lockup { history: LockupRow[]; upcoming: LockupRow[] }
 export interface Board { name: string; code: string; change_pct: number | string; lead_stock: string }
 export interface Blocks { total: number; boards: Board[]; concept_tags: string[] }
 export interface HotConcept { concept: string; bk: string; hit: number }
 export interface QaRow { company: string; question: string; answer: string | null; answerer: string; ask_time: string }
-export interface IndustryRow { rank: number; name: string; change_pct: number; code: string; up_count: number; down_count: number }
+export interface IndustryRow { rank: number; name: string; change_pct: number | null; code: string; up_count: number | null; down_count: number | null }
 export interface IndustryData { top: IndustryRow[]; bottom: IndustryRow[]; total: number }
 
 // 全球市场（美股 / 港股，移植自 global-stock-data · 东财域内源）

@@ -628,10 +628,10 @@ def dividend(code: str = Query(...)):
 @app.get("/api/fund-flow")
 def fund_flow(code: str = Query(...)):
     """个股资金流（东财 push2his，120 日主力净流入）。缓存 15 分钟。
-    注：push2his 对部分大陆住宅 IP 有间歇风控，可能返回空（非代码问题）。"""
+    请求失败与接口无记录分别处理。"""
     code = _validate(code)
     try:
-        return {"data": _cached("fundflow", code, 900, lambda: astock.stock_fund_flow_120d(code))}
+        return {"data": _cached("fundflow", code, 900, lambda: astock.stock_fund_flow_120d(code, strict=True))}
     except Exception as e:  # noqa: BLE001
         raise HTTPException(502, f"资金流异常：{e}") from e
 
